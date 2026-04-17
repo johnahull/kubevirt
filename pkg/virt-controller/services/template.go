@@ -332,6 +332,10 @@ func (t *TemplateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 	var userId int64 = util.RootUser
 
 	nonRoot := util.IsNonRootVMI(vmi)
+	if nonRoot && (len(vmi.Spec.Domain.Devices.HostDevices) > 0 || len(vmi.Spec.Domain.Devices.GPUs) > 0) {
+		log.Log.Infof("Forcing root mode for VMI %s/%s: VFIO host devices require root for capability propagation", vmi.Namespace, vmi.Name)
+		nonRoot = false
+	}
 	if nonRoot {
 		userId = util.NonRootUID
 	}
@@ -559,7 +563,9 @@ func (t *TemplateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 	}
 
 	if !t.clusterConfig.ImageVolumeEnabled() && (HaveContainerDiskVolume(vmi.Spec.Volumes) || util.HasKernelBootContainerImage(vmi)) {
-		initContainerCommand := []string{"/usr/bin/cp", "--preserve=all",
+		// Use --preserve=mode,timestamps instead of --preserve=all to avoid
+		// chown failures in non-root or capability-restricted containers.
+		initContainerCommand := []string{"/usr/bin/cp", "--preserve=mode,timestamps",
 			"/usr/bin/container-disk",
 			"/init/usr/bin/container-disk",
 		}
@@ -617,6 +623,14 @@ func (t *TemplateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 	enableServiceLinks := false
 
 	var podSeccompProfile *k8sv1.SeccompProfile = nil
+	// Use Unconfined seccomp for VFIO host devices to allow
+	// privilege escalation via file capabilities (setcap) which
+	// is required by the virt-launcher binary for prlimit()/memlock.
+	if len(vmi.Spec.Domain.Devices.HostDevices) > 0 || len(vmi.Spec.Domain.Devices.GPUs) > 0 {
+		podSeccompProfile = &k8sv1.SeccompProfile{
+			Type: k8sv1.SeccompProfileTypeUnconfined,
+		}
+	}
 	if seccompConf := t.clusterConfig.GetConfig().SeccompConfiguration; seccompConf != nil && seccompConf.VirtualMachineInstanceProfile != nil {
 		vmProfile := seccompConf.VirtualMachineInstanceProfile
 		if customProfile := vmProfile.CustomProfile; customProfile != nil {
@@ -1301,6 +1315,10 @@ func NewTemplateService(launcherImage string,
 ) *TemplateService {
 
 	precond.MustNotBeEmpty(launcherImage)
+	if override := os.Getenv("VIRT_LAUNCHER_IMAGE_OVERRIDE"); override != "" {
+		launcherImage = override
+		log.Log.Infof("Using launcher image override: %s", override)
+	}
 	log.Log.V(1).Infof("Exporter Image: %s", exporterImage)
 	svc := TemplateService{
 		launcherImage:               launcherImage,

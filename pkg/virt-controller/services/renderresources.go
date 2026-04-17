@@ -510,6 +510,9 @@ func validatePermittedHostDevices(spec *v1.VirtualMachineInstanceSpec, config *v
 			}
 		}
 		for _, hostDev := range spec.Domain.Devices.HostDevices {
+			if config.HostDevicesWithDRAEnabled() && hostDev.ClaimRequest != nil {
+				continue
+			}
 			if _, exist := supportedHostDevicesMap[hostDev.DeviceName]; !exist {
 				errors = append(errors, fmt.Sprintf("HostDevice %s is not permitted in permittedHostDevices configuration", hostDev.DeviceName))
 			}

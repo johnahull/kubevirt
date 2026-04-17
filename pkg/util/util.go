@@ -40,8 +40,10 @@ const (
 )
 
 func IsNonRootVMI(vmi *v1.VirtualMachineInstance) bool {
+	if vmi.Spec.Domain.Memory != nil && vmi.Spec.Domain.Memory.Hugepages != nil {
+		return false
+	}
 	_, ok := vmi.Annotations[v1.DeprecatedNonRootVMIAnnotation]
-
 	nonRoot := vmi.Status.RuntimeUser != 0
 	return ok || nonRoot
 }

@@ -294,6 +294,11 @@ func generateContainerFromVolume(vmi *v1.VirtualMachineInstance, config *virtcon
 	noPrivilegeEscalation := false
 	nonRoot := true
 	var userId int64 = util.NonRootUID
+	// Force root for VFIO host devices — init containers need chown capability
+	if len(vmi.Spec.Domain.Devices.HostDevices) > 0 || len(vmi.Spec.Domain.Devices.GPUs) > 0 {
+		userId = 0
+		nonRoot = false
+	}
 
 	container := &kubev1.Container{
 		Name:            name,
