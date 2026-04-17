@@ -21,6 +21,7 @@ package kvm
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"strconv"
 	"strings"
@@ -88,24 +89,32 @@ func (k *KvmVirtRuntime) AdjustResources(vmi *v1.VirtualMachineInstance, config 
 
 	targetProcessID := targetProcess.Pid()
 
-	var memlockSize resource.Quantity
-	if vmi.Status.MigrationState != nil && vmi.Status.MigrationState.TargetMemoryOverhead != nil {
-		memlockSize = *vmi.Status.MigrationState.TargetMemoryOverhead
+	var memlockSize int64
+	if util.IsVFIOVMI(vmi) {
+		// VFIO devices may have large PCIe BARs (e.g., MI300X GPU VF = 256GB BAR).
+		// Libvirt locks guest_memory + sum(all_VFIO_BAR_sizes) via mlock().
+		// Set unlimited to match CRI-O's container-level memlock and let
+		// pod cgroup limits enforce the actual memory boundary.
+		memlockSize = math.MaxInt64
 	} else {
-		// TODO: Remove this fallback once VmiMemoryOverheadReport feature gate is GA
-		// and we are sure that all VMIs include the MemoryOverhead status field
-		memlockSize = k.GetMemoryOverhead(vmi, runtime.GOARCH, config.AdditionalGuestMemoryOverheadRatio)
+		var overhead resource.Quantity
+		if vmi.Status.MigrationState != nil && vmi.Status.MigrationState.TargetMemoryOverhead != nil {
+			overhead = *vmi.Status.MigrationState.TargetMemoryOverhead
+		} else {
+			// TODO: Remove this fallback once VmiMemoryOverheadReport feature gate is GA
+			// and we are sure that all VMIs include the MemoryOverhead status field
+			overhead = k.GetMemoryOverhead(vmi, runtime.GOARCH, config.AdditionalGuestMemoryOverheadRatio)
+		}
+		vmiBaseMemory := getVMIBaseMemory(vmi)
+		overhead.Add(*resource.NewScaledQuantity(vmiBaseMemory.ScaledValue(resource.Kilo), resource.Kilo))
+		memlockSize = overhead.Value()
 	}
-	// Add memory assigned to the VM
-	vmiBaseMemory := getVMIBaseMemory(vmi)
 
-	memlockSize.Add(*resource.NewScaledQuantity(vmiBaseMemory.ScaledValue(resource.Kilo), resource.Kilo))
-
-	if err := common.SetProcessMemoryLockRLimit(targetProcessID, memlockSize.Value()); err != nil {
-		return fmt.Errorf("failed to set process %d memlock rlimit to %d: %v", targetProcessID, memlockSize.Value(), err)
+	if err := common.SetProcessMemoryLockRLimit(targetProcessID, memlockSize); err != nil {
+		return fmt.Errorf("failed to set process %d memlock rlimit to %d: %v", targetProcessID, memlockSize, err)
 	}
 	log.Log.V(5).Object(vmi).Infof("set process %+v memlock rlimits to: Cur: %[2]d Max:%[2]d",
-		targetProcess, memlockSize.Value())
+		targetProcess, memlockSize)
 
 	return nil
 }

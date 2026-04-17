@@ -198,6 +198,9 @@ func ConvertKubeVirtMemoryBackingToDomainMemoryBacking(memBack *api.MemoryBackin
 			Mode: string(memBack.Allocation.Mode),
 		}
 	}
+	if memBack.Locked != nil {
+		domMemBack.MemoryLocked = &libvirtxml.DomainMemoryLocked{}
+	}
 	if memBack.NoSharePages != nil {
 		domMemBack.MemoryNosharepages = &libvirtxml.DomainMemoryNosharepages{}
 	}

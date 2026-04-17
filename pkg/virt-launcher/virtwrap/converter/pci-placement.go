@@ -183,6 +183,10 @@ type expanderBusAssigner struct {
 	devices          map[string]*api.HostDevice
 	devicesNUMANodes map[string]uint32
 
+	// draNUMAOverrides maps PCI address → NUMA node from KEP-5304 metadata.
+	// Used as fallback when sysfs NUMA lookup fails (DRA VFIO devices).
+	draNUMAOverrides map[string]uint32
+
 	// lastAssignedBusNr tracks the last assigned bus number for expander buses.
 	// It starts from maxExpanderBusNr and decreases as expander buses are assigned
 	// to ensure controller indices don't conflict with expander bus number space.
@@ -224,8 +228,13 @@ func newExpanderBusAssigner(domainSpec *api.DomainSpec) *expanderBusAssigner {
 // PlacePCIDevicesWithNUMAAlignment places PCI devices in the domainSpec with
 // NUMA alignment using PCIe expander buses. It modifies the domainSpec in place
 // or leaves it unchanged in case of an error.
-func PlacePCIDevicesWithNUMAAlignment(domainSpec *api.DomainSpec) error {
+// draNUMAOverrides maps PCI address → NUMA node from KEP-5304 metadata,
+// used when sysfs NUMA lookup is unavailable (e.g., DRA VFIO devices).
+func PlacePCIDevicesWithNUMAAlignment(domainSpec *api.DomainSpec, draNUMAOverrides ...map[string]uint32) error {
 	assigner := newExpanderBusAssigner(domainSpec)
+	if len(draNUMAOverrides) > 0 && draNUMAOverrides[0] != nil {
+		assigner.draNUMAOverrides = draNUMAOverrides[0]
+	}
 	return assigner.PlaceNumaAlignedDevices()
 }
 
@@ -283,6 +292,16 @@ func (a *expanderBusAssigner) addDevices(devices []api.HostDevice) {
 		if numaNode, exists := numaNodes[address]; exists {
 			a.devices[address] = device
 			a.devicesNUMANodes[address] = numaNode
+		} else if a.draNUMAOverrides != nil {
+			// Fallback to DRA KEP-5304 metadata NUMA node when the sysfs/vCPU
+			// mapping fails (e.g., DRA device on a NUMA node without vCPUs).
+			if numaNode, exists := a.draNUMAOverrides[address]; exists {
+				log.Log.Infof("Using DRA metadata NUMA node %d for device %s", numaNode, address)
+				a.devices[address] = device
+				a.devicesNUMANodes[address] = numaNode
+			} else {
+				log.Log.Infof("device %s has no NUMA affinity from sysfs or DRA metadata, skipping", address)
+			}
 		} else {
 			log.Log.Infof("device %s has no NUMA affinity information, skipping for pcie-expander-bus assignment", address)
 		}

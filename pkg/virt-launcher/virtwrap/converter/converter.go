@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -56,6 +57,13 @@ import (
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/iothreads"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/kvm"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/metadata"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/mshv"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/network"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/storage"
+	drautil "kubevirt.io/kubevirt/pkg/dra"
+	"kubevirt.io/kubevirt/pkg/util/hardware"
 	convertertypes "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/types"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/vcpu"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/virtio"
@@ -1029,6 +1037,16 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 		isMemfdRequired = true
 	}
 
+	// Lock guest memory when VFIO devices are present so QEMU can pin pages for DMA.
+	// Without <locked/>, libvirt generates -overcommit mem-lock=off and VFIO device
+	// initialization fails (SIGABRT) because DMA mappings require pinned memory.
+	if util.IsVFIOVMI(vmi) {
+		if domain.Spec.MemoryBacking == nil {
+			domain.Spec.MemoryBacking = &api.MemoryBacking{}
+		}
+		domain.Spec.MemoryBacking.Locked = &api.Locked{}
+	}
+
 	if isMemfdRequired {
 		// Set memfd as memory backend to solve SELinux restrictions
 		// See the issue: https://github.com/kubevirt/kubevirt/issues/3781
@@ -1145,14 +1163,25 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 	if vmi.Spec.Domain.CPU != nil {
 		// Adjust guest vcpu config. Currently will handle vCPUs to pCPUs pinning
 		if vmi.IsCPUDedicated() {
-			err = vcpu.AdjustDomainForTopologyAndCPUSet(domain, vmi, c.Topology, c.CPUSet, hasIOThreads)
+			// Collect DRA device NUMA nodes from KEP-5304 metadata BEFORE
+			// topology adjustment so guest NUMA cells can be created for
+			// NUMA nodes that have DRA devices but no vCPUs.
+			var draNUMAOverrides map[string]uint32
+			var draDeviceNUMANodes map[uint32]bool
+			if c.PCINUMAAwareTopologyEnabled && c.Architecture.SupportPCIePlacement() {
+				draNUMAOverrides = buildDRANUMAOverrides(vmi)
+				draDeviceNUMANodes = numaNodesFromOverrides(draNUMAOverrides)
+			}
+
+			err = vcpu.AdjustDomainForTopologyAndCPUSet(domain, vmi, c.Topology, c.CPUSet, hasIOThreads, draDeviceNUMANodes)
 			if err != nil {
 				return err
 			}
 
 			if c.PCINUMAAwareTopologyEnabled {
 				if c.Architecture.SupportPCIePlacement() {
-					if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec); err != nil {
+					transformDRAOverridesToGuestCells(draNUMAOverrides, &domain.Spec, draDeviceNUMANodes)
+					if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec, draNUMAOverrides); err != nil {
 						log.Log.Reason(err).Warningf("Failed to process PCIe NUMA-aware topology, falling back to default placement")
 					}
 				} else {
@@ -1272,4 +1301,146 @@ func GracePeriodSeconds(vmi *v1.VirtualMachineInstance) int64 {
 		gracePeriodSeconds = *vmi.Spec.TerminationGracePeriodSeconds
 	}
 	return gracePeriodSeconds
+}
+
+func convertCmdv1SMBIOSToComputeSMBIOS(input *cmdv1.SMBios) *compute.SMBIOS {
+	if input == nil {
+		return nil
+	}
+
+	return &compute.SMBIOS{
+		Manufacturer: input.Manufacturer,
+		Product:      input.Product,
+		Version:      input.Version,
+		SKU:          input.Sku,
+		Family:       input.Family,
+	}
+}
+
+func convertEFIConfiguration(input *convertertypes.EFIConfiguration) *compute.EFIConfiguration {
+	if input == nil {
+		return nil
+	}
+
+	return &compute.EFIConfiguration{
+		EFICode:      input.EFICode,
+		EFIVars:      input.EFIVars,
+		SecureLoader: input.SecureLoader,
+	}
+}
+
+// buildDRANUMAOverrides reads KEP-5304 metadata for DRA host devices and builds
+// a map of PCI address → NUMA node. This allows the PCIe expander bus assigner
+// to place DRA VFIO devices on the correct guest NUMA node even when the sysfs
+// lookup fails or vCPUs don't span the device's host NUMA node.
+func buildDRANUMAOverrides(vmi *v1.VirtualMachineInstance) map[string]uint32 {
+	overrides := make(map[string]uint32)
+
+	for _, hd := range vmi.Spec.Domain.Devices.HostDevices {
+		if hd.ClaimRequest == nil || hd.ClaimRequest.ClaimName == nil || hd.ClaimRequest.RequestName == nil {
+			continue
+		}
+
+		claimName := *hd.ClaimRequest.ClaimName
+		requestName := *hd.ClaimRequest.RequestName
+
+		pciAddr, err := drautil.GetPCIAddressForClaim(
+			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, claimName, requestName)
+		if err != nil {
+			continue
+		}
+
+		numaNode, err := drautil.GetNUMANodeForClaim(
+			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, claimName, requestName)
+		if err != nil {
+			// Fallback: read NUMA from host sysfs when metadata doesn't have it
+			if sysfsNUMA, sysErr := hardware.GetDeviceNumaNode(pciAddr); sysErr == nil && sysfsNUMA != nil {
+				numaNode = int64(*sysfsNUMA)
+				log.Log.Infof("DRA NUMA fallback to sysfs for %s: NUMA %d", pciAddr, numaNode)
+			} else {
+				continue
+			}
+		}
+
+		if numaNode >= 0 {
+			overrides[pciAddr] = uint32(numaNode)
+			log.Log.Infof("DRA NUMA override: device %s (claim=%s request=%s) → NUMA %d", pciAddr, claimName, requestName, numaNode)
+		}
+	}
+
+	return overrides
+}
+
+// numaNodesFromOverrides extracts the unique set of host NUMA node IDs
+// from PCI address → NUMA node overrides.
+func numaNodesFromOverrides(overrides map[string]uint32) map[uint32]bool {
+	if len(overrides) == 0 {
+		return nil
+	}
+	nodes := make(map[uint32]bool)
+	for _, numa := range overrides {
+		nodes[numa] = true
+	}
+	return nodes
+}
+
+// transformDRAOverridesToGuestCells converts DRA NUMA overrides from host NUMA
+// node IDs to guest NUMA cell IDs. CPU cells are mapped via NUMATune.MemNodes;
+// device-only cells (which have no MemNode entry) are mapped by their position
+// after the CPU cells in the NUMA cell list.
+func transformDRAOverridesToGuestCells(overrides map[string]uint32, domainSpec *api.DomainSpec, deviceNUMANodes map[uint32]bool) {
+	if len(overrides) == 0 {
+		return
+	}
+	hostToGuest := make(map[uint32]uint32)
+
+	// Map CPU cells from NUMATune.MemNodes
+	if domainSpec.NUMATune != nil {
+		for _, memNode := range domainSpec.NUMATune.MemNodes {
+			hostNUMA, err := strconv.ParseUint(memNode.NodeSet, 10, 32)
+			if err == nil {
+				hostToGuest[uint32(hostNUMA)] = memNode.CellID
+			}
+		}
+	}
+
+	// Map device-only cells: they are appended after CPU cells, with empty CPUs
+	if deviceNUMANodes != nil && domainSpec.CPU.NUMA != nil {
+		// Device-only cells are at the end of the cells list with CPUs=""
+		cpuCellCount := uint32(0)
+		if domainSpec.NUMATune != nil {
+			cpuCellCount = uint32(len(domainSpec.NUMATune.MemNodes))
+		}
+		deviceCellIdx := uint32(0)
+		for _, cell := range domainSpec.CPU.NUMA.Cells {
+			if cell.CPUs == "" {
+				// Device-only cell — map from deviceOnlyNUMANodes (sorted order)
+				// The cell ID is already set sequentially
+				cellID, _ := strconv.ParseUint(cell.ID, 10, 32)
+				// Find which host NUMA this device cell represents by position
+				sortedDeviceNUMA := sortedKeys(deviceNUMANodes)
+				if int(deviceCellIdx) < len(sortedDeviceNUMA) {
+					hostToGuest[sortedDeviceNUMA[deviceCellIdx]] = uint32(cellID)
+				}
+				deviceCellIdx++
+			}
+		}
+		_ = cpuCellCount // used for documentation
+	}
+
+	for pciAddr, hostNUMA := range overrides {
+		if guestCell, ok := hostToGuest[hostNUMA]; ok {
+			overrides[pciAddr] = guestCell
+		}
+	}
+}
+
+// sortedKeys returns sorted keys from a map[uint32]bool.
+func sortedKeys(m map[uint32]bool) []uint32 {
+	keys := make([]uint32, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	return keys
 }
