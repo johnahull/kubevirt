@@ -1447,5 +1447,43 @@ func buildDRANUMACells(domain *api.Domain, vmi *v1.VirtualMachineInstance, c *co
 		}
 	}
 
-	return nil
+	// Map device-only cells: they are appended after CPU cells, with empty CPUs.
+	// Only map NUMAs that don't already have a CPU cell mapping.
+	if deviceNUMANodes != nil && domainSpec.CPU.NUMA != nil {
+		var deviceOnlyNUMAs []uint32
+		for _, numaID := range sortedKeys(deviceNUMANodes) {
+			if _, hasCPUMapping := hostToGuest[numaID]; !hasCPUMapping {
+				deviceOnlyNUMAs = append(deviceOnlyNUMAs, numaID)
+			}
+		}
+		deviceCellIdx := uint32(0)
+		for _, cell := range domainSpec.CPU.NUMA.Cells {
+			if cell.CPUs == "" {
+				cellID, _ := strconv.ParseUint(cell.ID, 10, 32)
+				if int(deviceCellIdx) < len(deviceOnlyNUMAs) {
+					hostToGuest[deviceOnlyNUMAs[deviceCellIdx]] = uint32(cellID)
+				}
+				deviceCellIdx++
+			}
+		}
+	}
+
+	log.Log.Infof("DRA hostToGuest NUMA mapping: %v", hostToGuest)
+	for pciAddr, hostNUMA := range overrides {
+		if guestCell, ok := hostToGuest[hostNUMA]; ok {
+			log.Log.Infof("DRA NUMA transform: device %s host NUMA %d → guest cell %d", pciAddr, hostNUMA, guestCell)
+			overrides[pciAddr] = guestCell
+		} else {
+			log.Log.Infof("DRA NUMA transform: device %s host NUMA %d has NO guest mapping (will use raw host ID)", pciAddr, hostNUMA)
+		}
+	}
+}
+
+func sortedKeys(m map[uint32]bool) []uint32 {
+	keys := make([]uint32, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	return keys
 }
