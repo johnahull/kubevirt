@@ -308,7 +308,7 @@ type NUMA struct {
 
 type NUMACell struct {
 	ID           string `xml:"id,attr"`
-	CPUs         string `xml:"cpus,attr"`
+	CPUs         string `xml:"cpus,attr,omitempty"`
 	Memory       uint64 `xml:"memory,attr,omitempty"`
 	Unit         string `xml:"unit,attr,omitempty"`
 	MemoryAccess string `xml:"memAccess,attr,omitempty"`
@@ -562,6 +562,7 @@ type MemoryBacking struct {
 	Source       *MemoryBackingSource `xml:"source,omitempty"`
 	Access       *MemoryBackingAccess `xml:"access,omitempty"`
 	Allocation   *MemoryAllocation    `xml:"allocation,omitempty"`
+	Locked       *Locked              `xml:"locked,omitempty"`
 	NoSharePages *NoSharePages        `xml:"nosharepages,omitempty"`
 }
 
@@ -593,6 +594,9 @@ type HugePage struct {
 
 type MemoryBackingAccess struct {
 	Mode string `xml:"mode,attr"`
+}
+
+type Locked struct {
 }
 
 type NoSharePages struct {

@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 
 	k8sv1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
@@ -47,15 +48,22 @@ func IsHostDeviceDRA(hd v1.HostDevice) bool {
 // automatically provided by dra driver framework KEP-5304 is implemented and consumed by drivers.
 // See: kubernetes/enhancements#5304
 const (
-	DefaultMetadataBasePath = "/var/run/dra-device-attributes"
+	DefaultMetadataBasePath = "/var/run/kubernetes.io/dra-device-attributes/resourceclaims"
 )
 
 // GetPCIAddressForClaim returns the PCI address for a device in the given claim and request.
 // It lazily reads the KEP-5304 metadata file at lookup time.
 func GetPCIAddressForClaim(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (string, error) {
+	log.Log.Infof("DRA GetPCIAddressForClaim: basePath=%s claimRefName=%s requestName=%s claims=%d", basePath, claimRefName, requestName, len(resourceClaims))
 	device, err := resolveDevice(basePath, resourceClaims, claimRefName, requestName)
 	if err != nil {
+		log.Log.Infof("DRA resolveDevice failed: %v", err)
 		return "", err
+	}
+
+	log.Log.Infof("DRA resolved device: driver=%s pool=%s name=%s attrs=%d", device.Driver, device.Pool, device.Name, len(device.Attributes))
+	for k, v := range device.Attributes {
+		log.Log.Infof("DRA device attr: %s = %+v", k, v)
 	}
 
 	if attr, ok := device.Attributes[metadata.PCIBusIDAttribute]; ok {
@@ -64,6 +72,23 @@ func GetPCIAddressForClaim(basePath string, resourceClaims []k8sv1.PodResourceCl
 		}
 	}
 	return "", fmt.Errorf("pciBusID not found for claim %q request %q", claimRefName, requestName)
+}
+
+// GetNUMANodeForClaim returns the NUMA node for a device in the given claim and request.
+// This reads from KEP-5304 metadata, providing device NUMA topology for guest mapping.
+func GetNUMANodeForClaim(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (int64, error) {
+	device, err := resolveDevice(basePath, resourceClaims, claimRefName, requestName)
+	if err != nil {
+		return -1, err
+	}
+
+	numaAttrName := resourcev1.QualifiedName("numaNode")
+	if attr, ok := device.Attributes[numaAttrName]; ok {
+		if attr.IntValue != nil {
+			return *attr.IntValue, nil
+		}
+	}
+	return -1, fmt.Errorf("numaNode not found for claim %q request %q", claimRefName, requestName)
 }
 
 // GetMDevUUIDForClaim returns the mdev UUID for a device in the given claim and request.

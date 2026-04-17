@@ -41,6 +41,15 @@ const (
 	ENV_VAR_VIRT_LAUNCHER_LOG_VERBOSITY = "VIRT_LAUNCHER_LOG_VERBOSITY"
 )
 
+func IsNonRootVMI(vmi *v1.VirtualMachineInstance) bool {
+	if vmi.Spec.Domain.Memory != nil && vmi.Spec.Domain.Memory.Hugepages != nil {
+		return false
+	}
+	_, ok := vmi.Annotations[v1.DeprecatedNonRootVMIAnnotation]
+	nonRoot := vmi.Status.RuntimeUser != 0
+	return ok || nonRoot
+}
+
 func isSRIOVVmi(vmi *v1.VirtualMachineInstance) bool {
 	for _, iface := range vmi.Spec.Domain.Devices.Interfaces {
 		if iface.SRIOV != nil {

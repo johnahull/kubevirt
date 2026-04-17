@@ -207,14 +207,14 @@ func xdgEnvironmentVariables() []k8sv1.EnvVar {
 func securityContext(userId int64, requiredCapabilities *k8sv1.Capabilities) *k8sv1.SecurityContext {
 	isNonRoot := userId != 0
 	context := &k8sv1.SecurityContext{
-		RunAsUser:    &userId,
-		RunAsNonRoot: &isNonRoot,
-		Capabilities: requiredCapabilities,
+		RunAsUser:                &userId,
+		RunAsNonRoot:             &isNonRoot,
+		Capabilities:             requiredCapabilities,
+		AllowPrivilegeEscalation: pointer.P(true),
 	}
 
 	if isNonRoot {
 		context.RunAsGroup = &userId
-		context.AllowPrivilegeEscalation = pointer.P(false)
 	}
 
 	return context
@@ -287,8 +287,18 @@ func requiredCapabilities(vmi *v1.VirtualMachineInstance) []k8sv1.Capability {
 	capabilities := []k8sv1.Capability{CAP_NET_BIND_SERVICE}
 
 	if !vmitrait.IsNonRoot(vmi) {
-		// add a CAP_SYS_NICE capability to allow setting cpu affinity
-		capabilities = append(capabilities, CAP_SYS_NICE)
+		capabilities = append(capabilities, CAP_SYS_NICE, "NET_ADMIN", "NET_RAW",
+			"SYS_RESOURCE", "SYS_RAWIO", "DAC_OVERRIDE", "FOWNER", "SYS_PTRACE")
+	}
+
+	if vmi.Spec.Domain.Memory != nil && vmi.Spec.Domain.Memory.Hugepages != nil {
+		capabilities = append(capabilities, "SYS_RESOURCE")
+	}
+
+	if len(vmi.Spec.Domain.Devices.HostDevices) > 0 || len(vmi.Spec.Domain.Devices.GPUs) > 0 {
+		capabilities = append(capabilities, CAP_SYS_NICE, "NET_ADMIN", "NET_RAW",
+			"SYS_RESOURCE", "SYS_RAWIO", "DAC_OVERRIDE", "FOWNER", "SYS_PTRACE", "IPC_LOCK",
+			"CHOWN", "SETUID", "SETGID", "SETPCAP", "KILL", "AUDIT_WRITE")
 	}
 
 	return capabilities
