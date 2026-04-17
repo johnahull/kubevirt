@@ -1404,33 +1404,35 @@ func transformDRAOverridesToGuestCells(overrides map[string]uint32, domainSpec *
 		}
 	}
 
-	// Map device-only cells: they are appended after CPU cells, with empty CPUs
+	// Map device-only cells: they are appended after CPU cells, with empty CPUs.
+	// Only map NUMAs that don't already have a CPU cell mapping.
 	if deviceNUMANodes != nil && domainSpec.CPU.NUMA != nil {
-		// Device-only cells are at the end of the cells list with CPUs=""
-		cpuCellCount := uint32(0)
-		if domainSpec.NUMATune != nil {
-			cpuCellCount = uint32(len(domainSpec.NUMATune.MemNodes))
+		// Filter to truly device-only NUMAs (not already mapped via CPU cells)
+		var deviceOnlyNUMAs []uint32
+		for _, numaID := range sortedKeys(deviceNUMANodes) {
+			if _, hasCPUMapping := hostToGuest[numaID]; !hasCPUMapping {
+				deviceOnlyNUMAs = append(deviceOnlyNUMAs, numaID)
+			}
 		}
 		deviceCellIdx := uint32(0)
 		for _, cell := range domainSpec.CPU.NUMA.Cells {
 			if cell.CPUs == "" {
-				// Device-only cell — map from deviceOnlyNUMANodes (sorted order)
-				// The cell ID is already set sequentially
 				cellID, _ := strconv.ParseUint(cell.ID, 10, 32)
-				// Find which host NUMA this device cell represents by position
-				sortedDeviceNUMA := sortedKeys(deviceNUMANodes)
-				if int(deviceCellIdx) < len(sortedDeviceNUMA) {
-					hostToGuest[sortedDeviceNUMA[deviceCellIdx]] = uint32(cellID)
+				if int(deviceCellIdx) < len(deviceOnlyNUMAs) {
+					hostToGuest[deviceOnlyNUMAs[deviceCellIdx]] = uint32(cellID)
 				}
 				deviceCellIdx++
 			}
 		}
-		_ = cpuCellCount // used for documentation
 	}
 
+	log.Log.Infof("DRA hostToGuest NUMA mapping: %v", hostToGuest)
 	for pciAddr, hostNUMA := range overrides {
 		if guestCell, ok := hostToGuest[hostNUMA]; ok {
+			log.Log.Infof("DRA NUMA transform: device %s host NUMA %d → guest cell %d", pciAddr, hostNUMA, guestCell)
 			overrides[pciAddr] = guestCell
+		} else {
+			log.Log.Infof("DRA NUMA transform: device %s host NUMA %d has NO guest mapping (will use raw host ID)", pciAddr, hostNUMA)
 		}
 	}
 }
