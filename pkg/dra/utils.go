@@ -54,16 +54,9 @@ const (
 // GetPCIAddressForClaim returns the PCI address for a device in the given claim and request.
 // It lazily reads the KEP-5304 metadata file at lookup time.
 func GetPCIAddressForClaim(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (string, error) {
-	log.Log.Infof("DRA GetPCIAddressForClaim: basePath=%s claimRefName=%s requestName=%s claims=%d", basePath, claimRefName, requestName, len(resourceClaims))
 	device, err := resolveDevice(basePath, resourceClaims, claimRefName, requestName)
 	if err != nil {
-		log.Log.Infof("DRA resolveDevice failed: %v", err)
 		return "", err
-	}
-
-	log.Log.Infof("DRA resolved device: driver=%s pool=%s name=%s attrs=%d", device.Driver, device.Pool, device.Name, len(device.Attributes))
-	for k, v := range device.Attributes {
-		log.Log.Infof("DRA device attr: %s = %+v", k, v)
 	}
 
 	if attr, ok := device.Attributes[metadata.PCIBusIDAttribute]; ok {

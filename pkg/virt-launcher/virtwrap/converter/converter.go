@@ -1434,7 +1434,7 @@ func buildDRANUMAOverrides(vmi *v1.VirtualMachineInstance) map[string]uint32 {
 			// Fallback: read NUMA from host sysfs when metadata doesn't have it
 			if sysfsNUMA, sysErr := hardware.GetDeviceNumaNode(pciAddr); sysErr == nil && sysfsNUMA != nil {
 				numaNode = int64(*sysfsNUMA)
-				log.Log.Infof("DRA NUMA fallback to sysfs for %s: NUMA %d", pciAddr, numaNode)
+				log.Log.V(2).Infof("DRA NUMA fallback to sysfs for %s: NUMA %d", pciAddr, numaNode)
 			} else {
 				continue
 			}
@@ -1442,7 +1442,7 @@ func buildDRANUMAOverrides(vmi *v1.VirtualMachineInstance) map[string]uint32 {
 
 		if numaNode >= 0 {
 			overrides[pciAddr] = uint32(numaNode)
-			log.Log.Infof("DRA NUMA override: device %s (claim=%s request=%s) → NUMA %d", pciAddr, claimName, requestName, numaNode)
+			log.Log.V(2).Infof("DRA NUMA override: device %s (claim=%s request=%s) → NUMA %d", pciAddr, claimName, requestName, numaNode)
 		}
 	}
 
@@ -1504,13 +1504,13 @@ func transformDRAOverridesToGuestCells(overrides map[string]uint32, domainSpec *
 		}
 	}
 
-	log.Log.Infof("DRA hostToGuest NUMA mapping: %v", hostToGuest)
+	log.Log.V(2).Infof("DRA hostToGuest NUMA mapping: %v", hostToGuest)
 	for pciAddr, hostNUMA := range overrides {
 		if guestCell, ok := hostToGuest[hostNUMA]; ok {
-			log.Log.Infof("DRA NUMA transform: device %s host NUMA %d → guest cell %d", pciAddr, hostNUMA, guestCell)
+			log.Log.V(2).Infof("DRA NUMA transform: device %s host NUMA %d → guest cell %d", pciAddr, hostNUMA, guestCell)
 			overrides[pciAddr] = guestCell
 		} else {
-			log.Log.Infof("DRA NUMA transform: device %s host NUMA %d has NO guest mapping (will use raw host ID)", pciAddr, hostNUMA)
+			log.Log.Warningf("DRA NUMA transform: device %s host NUMA %d has no guest cell mapping", pciAddr, hostNUMA)
 		}
 	}
 }
