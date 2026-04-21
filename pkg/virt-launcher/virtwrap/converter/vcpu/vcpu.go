@@ -2,6 +2,7 @@ package vcpu
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -450,7 +451,7 @@ func FormatEmulatorThreadPin(cpuPool VCPUPool, vmiAnnotations map[string]string,
 	return convertCPUListToCPUSet(emulatorThreads), nil
 }
 
-func AdjustDomainForTopologyAndCPUSet(domain *api.Domain, vmi *v12.VirtualMachineInstance, topology *v1.Topology, cpuset []int, useIOThreads bool) error {
+func AdjustDomainForTopologyAndCPUSet(domain *api.Domain, vmi *v12.VirtualMachineInstance, topology *v1.Topology, cpuset []int, useIOThreads bool, draDeviceNUMANodes ...map[uint32]bool) error {
 	var cpuPool VCPUPool
 	requestedToplogy := &api.CPUTopology{
 		Sockets: domain.Spec.CPU.Topology.Sockets,
@@ -524,7 +525,11 @@ func AdjustDomainForTopologyAndCPUSet(domain *api.Domain, vmi *v12.VirtualMachin
 	}
 
 	if isNumaPassthrough(vmi) {
-		if err := numaMapping(vmi, &domain.Spec, topology); err != nil {
+		var deviceNUMANodes map[uint32]bool
+		if len(draDeviceNUMANodes) > 0 {
+			deviceNUMANodes = draDeviceNUMANodes[0]
+		}
+		if err := numaMapping(vmi, &domain.Spec, topology, deviceNUMANodes); err != nil {
 			log.Log.Reason(err).Error("failed to calculate passed through NUMA topology.")
 			return err
 		}
@@ -586,8 +591,9 @@ func GetVirtualMemory(vmi *v12.VirtualMachineInstance) *resource.Quantity {
 }
 
 // numaMapping maps numa nodes based on already applied VCPU pinning. The sort result is stable compared to the order
-// of provided host numa nodes.
-func numaMapping(vmi *v12.VirtualMachineInstance, domain *api.DomainSpec, topology *v1.Topology) error {
+// of provided host numa nodes. When draDeviceNUMANodes is provided, guest NUMA cells are also created for host NUMA
+// nodes that have DRA devices but no vCPUs, enabling correct guest NUMA topology for DRA VFIO passthrough.
+func numaMapping(vmi *v12.VirtualMachineInstance, domain *api.DomainSpec, topology *v1.Topology, draDeviceNUMANodes ...map[uint32]bool) error {
 	if topology == nil || len(topology.NumaCells) == 0 {
 		// If there is no numa topology reported, we don't do anything.
 		// this also means that emulated numa for e.g. memfd will keep intact
@@ -599,18 +605,39 @@ func numaMapping(vmi *v12.VirtualMachineInstance, domain *api.DomainSpec, topolo
 		return fmt.Errorf("failed to generate numa pinning information: %v", err)
 	}
 
-	var involvedCellIDs []string
-	for _, cell := range topology.NumaCells {
-		if _, exists := numamap[cell.Id]; exists {
-			involvedCellIDs = append(involvedCellIDs, strconv.Itoa(int(cell.Id)))
+	// Identify device-only NUMA nodes: present in DRA metadata but not in numamap.
+	// These need guest NUMA cells for correct pxb-pcie device placement.
+	var deviceOnlyNUMANodes []uint32
+	if len(draDeviceNUMANodes) > 0 && draDeviceNUMANodes[0] != nil {
+		for numaID := range draDeviceNUMANodes[0] {
+			if _, hasCPUs := numamap[numaID]; !hasCPUs {
+				deviceOnlyNUMANodes = append(deviceOnlyNUMANodes, numaID)
+			}
+		}
+		sort.Slice(deviceOnlyNUMANodes, func(i, j int) bool {
+			return deviceOnlyNUMANodes[i] < deviceOnlyNUMANodes[j]
+		})
+		if len(deviceOnlyNUMANodes) > 0 {
+			log.Log.Infof("Creating %d device-only guest NUMA cells for host NUMA nodes %v", len(deviceOnlyNUMANodes), deviceOnlyNUMANodes)
 		}
 	}
+
+	// CPU cell IDs (for NUMATune NodeSet — only CPU-bearing nodes)
+	var cpuCellIDs []string
+	for _, cell := range topology.NumaCells {
+		if _, exists := numamap[cell.Id]; exists {
+			cpuCellIDs = append(cpuCellIDs, strconv.Itoa(int(cell.Id)))
+		}
+	}
+
+	// Total cell count includes device-only nodes (for memory validation)
+	totalCellCount := uint64(len(cpuCellIDs)) + uint64(len(deviceOnlyNUMANodes))
 
 	domain.CPU.NUMA = &api.NUMA{}
 	domain.NUMATune = &api.NUMATune{
 		Memory: api.NumaTuneMemory{
 			Mode:    "strict",
-			NodeSet: strings.Join(involvedCellIDs, ","),
+			NodeSet: strings.Join(cpuCellIDs, ","),
 		},
 	}
 
@@ -627,18 +654,29 @@ func numaMapping(vmi *v12.VirtualMachineInstance, domain *api.DomainSpec, topolo
 		return fmt.Errorf("could not convert VMI memory to quantity: %v", err)
 	}
 	memoryBytes := memory.Value
-	var mod uint64
-	cellCount := uint64(len(involvedCellIDs))
-	if memoryBytes < cellCount*hugepagesSize {
-		return fmt.Errorf("not enough memory requested to allocate at least one hugepage per numa node: %v < %v", memory, cellCount*(hugepagesSize*1024*1024))
+
+	// Reserve one hugepage per device-only NUMA cell; distribute rest to vCPU cells
+	deviceOnlyMemory := uint64(len(deviceOnlyNUMANodes)) * hugepagesSize
+	cpuCellCount := uint64(len(numamap))
+	// totalCellCount already defined above
+
+	if memoryBytes < totalCellCount*hugepagesSize {
+		return fmt.Errorf("not enough memory requested to allocate at least one hugepage per numa node: %v < %v", memory, totalCellCount*(hugepagesSize*1024*1024))
 	} else if memoryBytes%hugepagesSize != 0 {
 		return fmt.Errorf("requested memory can't be divided through the numa page size: %v mod %v != 0", memory, hugepagesSize)
 	}
-	mod = memoryBytes % (hugepagesSize * cellCount) / hugepagesSize
-	if mod != 0 {
-		memoryBytes = memoryBytes - mod*hugepagesSize
+
+	// Memory for vCPU-bearing cells (total minus device-only reservations)
+	cpuCellMemory := memoryBytes - deviceOnlyMemory
+	var mod uint64
+	if cpuCellCount > 0 {
+		mod = cpuCellMemory % (hugepagesSize * cpuCellCount) / hugepagesSize
+		if mod != 0 {
+			cpuCellMemory = cpuCellMemory - mod*hugepagesSize
+		}
 	}
 
+	// Create cells for NUMA nodes with vCPUs
 	virtualCellID := -1
 	for _, cell := range topology.NumaCells {
 		if vcpus, exists := numamap[cell.Id]; exists {
@@ -648,10 +686,15 @@ func numaMapping(vmi *v12.VirtualMachineInstance, domain *api.DomainSpec, topolo
 			}
 			virtualCellID++
 
+			var cellMemory uint64
+			if cpuCellCount > 0 {
+				cellMemory = cpuCellMemory / cpuCellCount
+			}
+
 			domain.CPU.NUMA.Cells = append(domain.CPU.NUMA.Cells, api.NUMACell{
 				ID:     strconv.Itoa(virtualCellID),
 				CPUs:   strings.Join(cpus, ","),
-				Memory: memoryBytes / uint64(len(numamap)),
+				Memory: cellMemory,
 				Unit:   memory.Unit,
 			})
 			domain.NUMATune.MemNodes = append(domain.NUMATune.MemNodes, api.MemNode{
@@ -667,7 +710,30 @@ func numaMapping(vmi *v12.VirtualMachineInstance, domain *api.DomainSpec, topolo
 		}
 	}
 
-	if mod > 0 {
+	// Create cells for device-only NUMA nodes (no vCPUs, minimal memory).
+	// Do NOT add NUMATune.MemNode entries for device-only cells — libvirt
+	// would create thread-context with node-affinity to the host NUMA node,
+	// which fails when the cgroup doesn't allow that NUMA's CPUs.
+	// The memory comes from whatever NUMA the kernel chooses. The guest
+	// NUMA cell exists solely for pxb-pcie device placement via _PXM.
+	for _, numaID := range deviceOnlyNUMANodes {
+		_ = numaID // Used for logging; the cell maps via host→guest transform
+		virtualCellID++
+		domain.CPU.NUMA.Cells = append(domain.CPU.NUMA.Cells, api.NUMACell{
+			ID:     strconv.Itoa(virtualCellID),
+			CPUs:   "",
+			Memory: hugepagesSize,
+			Unit:   memory.Unit,
+		})
+		domain.MemoryBacking.HugePages.HugePage = append(domain.MemoryBacking.HugePages.HugePage, api.HugePage{
+			Size:    strconv.Itoa(int(hugepagesSize)),
+			Unit:    hugepagesUnit,
+			NodeSet: strconv.Itoa(virtualCellID),
+		})
+	}
+
+	// Distribute remainder hugepages to vCPU-bearing cells
+	if mod > 0 && cpuCellCount > 0 {
 		for i := range domain.CPU.NUMA.Cells[:mod] {
 			domain.CPU.NUMA.Cells[i].Memory += hugepagesSize
 		}

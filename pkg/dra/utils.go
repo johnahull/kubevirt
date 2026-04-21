@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 
 	k8sv1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
@@ -47,7 +48,7 @@ func IsHostDeviceDRA(hd v1.HostDevice) bool {
 // automatically provided by dra driver framework KEP-5304 is implemented and consumed by drivers.
 // See: kubernetes/enhancements#5304
 const (
-	DefaultMetadataBasePath = "/var/run/dra-device-attributes"
+	DefaultMetadataBasePath = "/var/run/kubernetes.io/dra-device-attributes"
 )
 
 // GetPCIAddressForClaim returns the PCI address for a device in the given claim and request.
@@ -64,6 +65,23 @@ func GetPCIAddressForClaim(basePath string, resourceClaims []k8sv1.PodResourceCl
 		}
 	}
 	return "", fmt.Errorf("pciBusID not found for claim %q request %q", claimRefName, requestName)
+}
+
+// GetNUMANodeForClaim returns the NUMA node for a device in the given claim and request.
+// This reads from KEP-5304 metadata, providing device NUMA topology for guest mapping.
+func GetNUMANodeForClaim(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (int64, error) {
+	device, err := resolveDevice(basePath, resourceClaims, claimRefName, requestName)
+	if err != nil {
+		return -1, err
+	}
+
+	numaAttrName := resourcev1.QualifiedName("numaNode")
+	if attr, ok := device.Attributes[numaAttrName]; ok {
+		if attr.IntValue != nil {
+			return *attr.IntValue, nil
+		}
+	}
+	return -1, fmt.Errorf("numaNode not found for claim %q request %q", claimRefName, requestName)
 }
 
 // GetMDevUUIDForClaim returns the mdev UUID for a device in the given claim and request.
@@ -107,16 +125,31 @@ func resolveDevice(basePath string, resourceClaims []k8sv1.PodResourceClaim, cla
 // resolveClaimMetadata reads the metadata file for a claim ref + request pair.
 // For direct claims it constructs the exact path; for template claims it
 // searches by PodClaimName.
-// KEP-5304 container path: {base}/{claimName}/{requestName}/{driverName}-metadata.json
+// KEP-5304 container path: {base}/{resourceclaims|resourceclaimtemplates}/{claimName}/{requestName}/{driverName}-metadata.json
 func resolveClaimMetadata(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (*metadata.DeviceMetadata, error) {
+	// KEP-5304 places metadata under resourceclaims/ for direct claims and
+	// resourceclaimtemplates/ for template-generated claims. Try both paths.
+	subdirs := []string{"resourceclaims", "resourceclaimtemplates"}
 	for _, rc := range resourceClaims {
 		if rc.Name != claimRefName {
 			continue
 		}
 		if rc.ResourceClaimName != nil && *rc.ResourceClaimName != "" {
-			return readMetadataFromDir(basePath, *rc.ResourceClaimName, requestName)
+			for _, subdir := range subdirs {
+				md, err := readMetadataFromDir(filepath.Join(basePath, subdir), *rc.ResourceClaimName, requestName)
+				if err == nil {
+					return md, nil
+				}
+			}
+			return nil, fmt.Errorf("metadata not found for direct claim %q request %q", *rc.ResourceClaimName, requestName)
 		}
-		return findMetadataByPodClaimName(basePath, rc.Name, requestName)
+		for _, subdir := range subdirs {
+			md, err := findMetadataByPodClaimName(filepath.Join(basePath, subdir), rc.Name, requestName)
+			if err == nil {
+				return md, nil
+			}
+		}
+		return nil, fmt.Errorf("metadata not found for template claim %q request %q", rc.Name, requestName)
 	}
 	return nil, fmt.Errorf("metadata not found for claim %q", claimRefName)
 }
