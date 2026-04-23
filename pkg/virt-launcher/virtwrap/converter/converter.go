@@ -57,11 +57,6 @@ import (
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/iothreads"
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/kvm"
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/metadata"
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/mshv"
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/network"
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/storage"
 	drautil "kubevirt.io/kubevirt/pkg/dra"
 	"kubevirt.io/kubevirt/pkg/util/hardware"
 	convertertypes "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/types"
@@ -1163,7 +1158,7 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 			// NUMA nodes that have DRA devices but no vCPUs.
 			var draNUMAOverrides map[string]uint32
 			var draDeviceNUMANodes map[uint32]bool
-			if c.PCINUMAAwareTopologyEnabled && c.Architecture.SupportPCIePlacement() {
+			if c.PCINUMAAwareTopologyEnabled {
 				draNUMAOverrides = buildDRANUMAOverrides(vmi)
 				draDeviceNUMANodes = numaNodesFromOverrides(draNUMAOverrides)
 			}
@@ -1174,13 +1169,9 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 			}
 
 			if c.PCINUMAAwareTopologyEnabled {
-				if c.Architecture.SupportPCIePlacement() {
-					transformDRAOverridesToGuestCells(draNUMAOverrides, &domain.Spec, draDeviceNUMANodes)
-					if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec, draNUMAOverrides); err != nil {
-						log.Log.Reason(err).Warningf("Failed to process PCIe NUMA-aware topology, falling back to default placement")
-					}
-				} else {
-					log.Log.Infof("Skipping PCIe NUMA alignment: architecture %s does not support PCIe placement", c.Architecture.GetArchitecture())
+				transformDRAOverridesToGuestCells(draNUMAOverrides, &domain.Spec, draDeviceNUMANodes)
+				if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec, draNUMAOverrides); err != nil {
+					log.Log.Reason(err).Warningf("Failed to process PCIe NUMA-aware topology, falling back to default placement")
 				}
 			}
 		}
@@ -1292,32 +1283,6 @@ func GracePeriodSeconds(vmi *v1.VirtualMachineInstance) int64 {
 		gracePeriodSeconds = *vmi.Spec.TerminationGracePeriodSeconds
 	}
 	return gracePeriodSeconds
-}
-
-func convertCmdv1SMBIOSToComputeSMBIOS(input *cmdv1.SMBios) *compute.SMBIOS {
-	if input == nil {
-		return nil
-	}
-
-	return &compute.SMBIOS{
-		Manufacturer: input.Manufacturer,
-		Product:      input.Product,
-		Version:      input.Version,
-		SKU:          input.Sku,
-		Family:       input.Family,
-	}
-}
-
-func convertEFIConfiguration(input *convertertypes.EFIConfiguration) *compute.EFIConfiguration {
-	if input == nil {
-		return nil
-	}
-
-	return &compute.EFIConfiguration{
-		EFICode:      input.EFICode,
-		EFIVars:      input.EFIVars,
-		SecureLoader: input.SecureLoader,
-	}
 }
 
 // buildDRANUMAOverrides reads KEP-5304 metadata for DRA host devices and builds
