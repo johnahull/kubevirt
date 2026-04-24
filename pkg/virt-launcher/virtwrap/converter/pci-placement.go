@@ -22,7 +22,8 @@ const (
 )
 
 type pciNUMAPlacementOptions struct {
-	strict bool
+	strict        bool
+	numaOverrides map[string]uint32
 }
 
 // PCIPlacementOption configures PCI NUMA-aware placement behavior.
@@ -33,6 +34,12 @@ type PCIPlacementOption func(*pciNUMAPlacementOptions)
 func WithStrictPCINUMAPlacement() PCIPlacementOption {
 	return func(options *pciNUMAPlacementOptions) {
 		options.strict = true
+	}
+}
+
+func WithNUMAOverrides(overrides map[string]uint32) PCIPlacementOption {
+	return func(options *pciNUMAPlacementOptions) {
+		options.numaOverrides = overrides
 	}
 }
 
@@ -243,6 +250,12 @@ func newExpanderBusAssigner(domainSpec *api.DomainSpec, opts ...PCIPlacementOpti
 		controllerIndex:   currentControllerIndex,
 		controllerCount:   0,
 		lastAssignedBusNr: maxExpanderBusNr,
+	}
+
+	if options.numaOverrides != nil {
+		for addr, node := range options.numaOverrides {
+			assigner.devicesNUMANodes[addr] = node
+		}
 	}
 
 	return assigner
