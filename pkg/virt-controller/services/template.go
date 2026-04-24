@@ -823,7 +823,7 @@ func newSidecarContainerRenderer(sidecarName string, vmiSpec *v1.VirtualMachineI
 		WithResourceRequirements(resources),
 		WithArgs(requestedHookSidecar.Args),
 		WithExtraEnvVars([]k8sv1.EnvVar{
-			k8sv1.EnvVar{
+			{
 				Name:  hooks.ContainerNameEnvVar,
 				Value: sidecarName,
 			}}),
@@ -1595,6 +1595,9 @@ func (t *TemplateService) VMIResourcePredicates(vmi *v1.VirtualMachineInstance, 
 			NewVMIResourceRule(func(vmi *v1.VirtualMachineInstance) bool {
 				return t.clusterConfig.NetworkDevicesWithDRAGateEnabled() && vmispec.HasDRANetwork(vmi.Spec.Networks)
 			}, WithNetworksDRA(vmi.Spec.Networks)),
+			NewVMIResourceRule(func(vmi *v1.VirtualMachineInstance) bool {
+				return len(vmi.Spec.ResourceClaims) > 0
+			}, WithExtraResourceClaims(vmi.Spec.ResourceClaims, vmi.Spec.Domain.Devices.GPUs, vmi.Spec.Domain.Devices.HostDevices)),
 			NewVMIResourceRule(util.IsSEVVMI, WithSEV()),
 			NewVMIResourceRule(util.IsTDXVMI, WithTDX()),
 			NewVMIResourceRule(reservation.HasVMIPersistentReservation, WithPersistentReservation()),
