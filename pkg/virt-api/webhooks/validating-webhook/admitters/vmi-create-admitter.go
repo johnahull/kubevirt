@@ -739,20 +739,20 @@ func validateNUMA(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, con
 				Field: field.Child("domain", "cpu", "numa", "guestMappingPassthrough").String(),
 			})
 		}
-		if !spec.Domain.CPU.DedicatedCPUPlacement {
+		if !spec.Domain.CPU.DedicatedCPUPlacement && len(spec.ResourceClaims) == 0 {
 			causes = append(causes, metav1.StatusCause{
 				Type: metav1.CauseTypeFieldValueInvalid,
-				Message: fmt.Sprintf("%s must be set to true when NUMA topology strategy is set in %s",
+				Message: fmt.Sprintf("%s must be set to true (or use DRA resource claims) when NUMA topology strategy is set in %s",
 					field.Child("domain", "cpu", "dedicatedCpuPlacement").String(),
 					field.Child("domain", "cpu", "numa", "guestMappingPassthrough").String(),
 				),
 				Field: field.Child("domain", "cpu", "numa", "guestMappingPassthrough").String(),
 			})
 		}
-		if spec.Domain.Memory == nil || spec.Domain.Memory.Hugepages == nil {
+		if (spec.Domain.Memory == nil || spec.Domain.Memory.Hugepages == nil) && len(spec.ResourceClaims) == 0 {
 			causes = append(causes, metav1.StatusCause{
 				Type: metav1.CauseTypeFieldValueInvalid,
-				Message: fmt.Sprintf("%s must be requested when NUMA topology strategy is set in %s",
+				Message: fmt.Sprintf("%s must be requested (or use DRA resource claims) when NUMA topology strategy is set in %s",
 					field.Child("domain", "memory", "hugepages").String(),
 					field.Child("domain", "cpu", "numa", "guestMappingPassthrough").String(),
 				),

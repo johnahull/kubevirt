@@ -224,8 +224,13 @@ func newExpanderBusAssigner(domainSpec *api.DomainSpec) *expanderBusAssigner {
 // PlacePCIDevicesWithNUMAAlignment places PCI devices in the domainSpec with
 // NUMA alignment using PCIe expander buses. It modifies the domainSpec in place
 // or leaves it unchanged in case of an error.
-func PlacePCIDevicesWithNUMAAlignment(domainSpec *api.DomainSpec) error {
+func PlacePCIDevicesWithNUMAAlignment(domainSpec *api.DomainSpec, numaOverrides ...map[string]uint32) error {
 	assigner := newExpanderBusAssigner(domainSpec)
+	for _, overrides := range numaOverrides {
+		for addr, node := range overrides {
+			assigner.devicesNUMANodes[addr] = node
+		}
+	}
 	return assigner.PlaceNumaAlignedDevices()
 }
 
