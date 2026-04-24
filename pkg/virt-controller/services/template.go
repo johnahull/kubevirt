@@ -1566,6 +1566,9 @@ func (t *TemplateService) VMIResourcePredicates(vmi *v1.VirtualMachineInstance, 
 			NewVMIResourceRule(func(vmi *v1.VirtualMachineInstance) bool {
 				return t.clusterConfig.HostDevicesWithDRAEnabled() && isHostDevVMIDRA(vmi)
 			}, WithHostDevicesDRA(vmi.Spec.Domain.Devices.HostDevices)),
+			NewVMIResourceRule(func(vmi *v1.VirtualMachineInstance) bool {
+				return len(vmi.Spec.ResourceClaims) > 0
+			}, WithExtraResourceClaims(vmi.Spec.ResourceClaims, vmi.Spec.Domain.Devices.GPUs, vmi.Spec.Domain.Devices.HostDevices)),
 			NewVMIResourceRule(util.IsSEVVMI, WithSEV()),
 			NewVMIResourceRule(reservation.HasVMIPersistentReservation, WithPersistentReservation()),
 		},

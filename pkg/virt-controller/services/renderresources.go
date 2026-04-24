@@ -208,6 +208,36 @@ func WithHostDevicesDRA(hostDevices []v1.HostDevice) ResourceRendererOption {
 	}
 }
 
+// WithExtraResourceClaims adds any VMI resourceClaims that aren't already
+// referenced by hostDevices or GPUs to the compute container. This allows
+// DRA CPU and memory claims to be used for NUMA-aware allocation.
+func WithExtraResourceClaims(vmiClaims []k8sv1.PodResourceClaim, gpus []v1.GPU, hostDevices []v1.HostDevice) ResourceRendererOption {
+	return func(r *ResourceRenderer) {
+		referenced := make(map[string]bool)
+		for _, g := range gpus {
+			if g.ClaimRequest != nil && g.ClaimRequest.ClaimName != nil {
+				referenced[*g.ClaimRequest.ClaimName] = true
+			}
+		}
+		for _, hd := range hostDevices {
+			if hd.ClaimRequest != nil && hd.ClaimRequest.ClaimName != nil {
+				referenced[*hd.ClaimRequest.ClaimName] = true
+			}
+		}
+		resources := r.ResourceRequirements()
+		for _, rc := range vmiClaims {
+			if !referenced[rc.Name] {
+				requestResourceClaims(&resources, &k8sv1.ResourceClaim{
+					Name: rc.Name,
+				})
+			}
+		}
+		copyResources(resources.Limits, r.calculatedLimits)
+		copyResources(resources.Requests, r.calculatedRequests)
+		copyResourceClaims(&resources, &r.resourceClaims)
+	}
+}
+
 func WithHugePages(vmMemory *v1.Memory, memoryOverhead resource.Quantity) ResourceRendererOption {
 	return func(renderer *ResourceRenderer) {
 		hugepageType := k8sv1.ResourceName(k8sv1.ResourceHugePagesPrefix + vmMemory.Hugepages.PageSize)
