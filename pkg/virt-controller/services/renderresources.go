@@ -161,18 +161,9 @@ func WithGPUsDevicePlugins(gpus []v1.GPU) ResourceRendererOption {
 
 func WithGPUsDRA(gpus []v1.GPU) ResourceRendererOption {
 	return func(r *ResourceRenderer) {
-		res := r.ResourceRequirements()
-		for _, g := range gpus {
-			if g.DeviceName == "" && g.ClaimRequest != nil {
-				requestResourceClaims(&res, &k8sv1.ResourceClaim{
-					Name:    *g.ClaimRequest.ClaimName,
-					Request: *g.ClaimRequest.RequestName,
-				})
-			}
-		}
-		copyResources(res.Limits, r.calculatedLimits)
-		copyResources(res.Requests, r.calculatedRequests)
-		copyResourceClaims(&res, &r.resourceClaims)
+		// GPU DRA claims are added by WithExtraResourceClaims without a
+		// specific request filter, so the kubelet injects CDI for all
+		// requests in the claim (including CPU, memory, etc.).
 	}
 }
 
@@ -193,44 +184,25 @@ func WithHostDevicesDevicePlugins(hostDevices []v1.HostDevice) ResourceRendererO
 // WithHostDevicesDRA adds ResourceClaims for HostDevices provisioned via DRA.
 func WithHostDevicesDRA(hostDevices []v1.HostDevice) ResourceRendererOption {
 	return func(r *ResourceRenderer) {
-		resources := r.ResourceRequirements()
-		for _, hd := range hostDevices {
-			if hd.DeviceName == "" && hd.ClaimRequest != nil && hd.ClaimRequest.ClaimName != nil && hd.ClaimRequest.RequestName != nil {
-				requestResourceClaims(&resources, &k8sv1.ResourceClaim{
-					Name:    *hd.ClaimRequest.ClaimName,
-					Request: *hd.ClaimRequest.RequestName,
-				})
-			}
-		}
-		copyResources(resources.Limits, r.calculatedLimits)
-		copyResources(resources.Requests, r.calculatedRequests)
-		copyResourceClaims(&resources, &r.resourceClaims)
+		// Host device DRA claims are added by WithExtraResourceClaims without
+		// a specific request filter, so the kubelet injects CDI for all
+		// requests in the claim.
 	}
 }
 
-// WithExtraResourceClaims adds any VMI resourceClaims that aren't already
-// referenced by hostDevices or GPUs to the compute container. This allows
-// DRA CPU and memory claims to be used for NUMA-aware allocation.
+// WithExtraResourceClaims adds all VMI resourceClaims to the compute container
+// without a specific request filter. This ensures the kubelet injects CDI
+// devices for ALL requests in each claim, including DRA CPU and memory requests
+// that aren't explicitly referenced by GPUs or hostDevices. The kubelet
+// deduplicates CDI device IDs, so adding a claim that's already referenced
+// by a specific request is safe.
 func WithExtraResourceClaims(vmiClaims []k8sv1.PodResourceClaim, gpus []v1.GPU, hostDevices []v1.HostDevice) ResourceRendererOption {
 	return func(r *ResourceRenderer) {
-		referenced := make(map[string]bool)
-		for _, g := range gpus {
-			if g.ClaimRequest != nil && g.ClaimRequest.ClaimName != nil {
-				referenced[*g.ClaimRequest.ClaimName] = true
-			}
-		}
-		for _, hd := range hostDevices {
-			if hd.ClaimRequest != nil && hd.ClaimRequest.ClaimName != nil {
-				referenced[*hd.ClaimRequest.ClaimName] = true
-			}
-		}
 		resources := r.ResourceRequirements()
 		for _, rc := range vmiClaims {
-			if !referenced[rc.Name] {
-				requestResourceClaims(&resources, &k8sv1.ResourceClaim{
-					Name: rc.Name,
-				})
-			}
+			requestResourceClaims(&resources, &k8sv1.ResourceClaim{
+				Name: rc.Name,
+			})
 		}
 		copyResources(resources.Limits, r.calculatedLimits)
 		copyResources(resources.Requests, r.calculatedRequests)
@@ -427,17 +399,18 @@ func requestResourceClaims(resources *k8sv1.ResourceRequirements, claim *k8sv1.R
 }
 
 func copyResourceClaims(resources *k8sv1.ResourceRequirements, claims *[]k8sv1.ResourceClaim) {
-	existing := make(map[string]struct{})
+	type claimKey struct{ name, request string }
+	existing := make(map[claimKey]struct{})
 	for _, c := range *claims {
-		existing[c.Name] = struct{}{}
+		existing[claimKey{c.Name, c.Request}] = struct{}{}
 	}
 
 	for _, value := range resources.Claims {
-		if _, found := existing[value.Name]; found {
-			continue // skip duplicates by Name
+		if _, found := existing[claimKey{value.Name, value.Request}]; found {
+			continue
 		}
 		*claims = append(*claims, value)
-		existing[value.Name] = struct{}{}
+		existing[claimKey{value.Name, value.Request}] = struct{}{}
 	}
 }
 
