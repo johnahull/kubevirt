@@ -242,3 +242,59 @@ func decodeMetadataFromStream(dec *json.Decoder) (*metadata.DeviceMetadata, erro
 	}
 	return nil, fmt.Errorf("no compatible metadata version found in stream (unknown versions: %s)", strings.Join(unknownVersions, ", "))
 }
+
+// NUMADeviceInfo holds device NUMA placement info from KEP-5304 metadata.
+type NUMADeviceInfo struct {
+	RequestName string
+	DeviceName  string
+	Driver      string
+	NUMANode    int64
+	PCIBusID    string
+}
+
+// DiscoverNUMANodesFromAllMetadata scans all KEP-5304 metadata files under
+// basePath and returns per-device NUMA placement info. This works regardless
+// of which DRA drivers publish metadata — it finds whatever is available.
+func DiscoverNUMANodesFromAllMetadata(basePath string) ([]NUMADeviceInfo, error) {
+	pattern := filepath.Join(basePath, "*", "*", "*", "*-metadata.json")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("failed to glob metadata files: %w", err)
+	}
+
+	var devices []NUMADeviceInfo
+	numaAttr := resourcev1.QualifiedName("resource.kubernetes.io/numaNode")
+	pciBusIDAttr := resourcev1.QualifiedName("resource.kubernetes.io/pciBusID")
+
+	for _, file := range matches {
+		md, err := readMetadataFile(file)
+		if err != nil {
+			log.Log.Reason(err).Warningf("Skipping metadata file %s", file)
+			continue
+		}
+
+		for _, req := range md.Requests {
+			for _, dev := range req.Devices {
+				info := NUMADeviceInfo{
+					RequestName: req.Name,
+					DeviceName:  dev.Name,
+					Driver:      dev.Driver,
+					NUMANode:    -1,
+				}
+				if attr, ok := dev.Attributes[numaAttr]; ok && attr.IntValue != nil {
+					info.NUMANode = *attr.IntValue
+				} else if attr, ok := dev.Attributes["numaNode"]; ok && attr.IntValue != nil {
+					info.NUMANode = *attr.IntValue
+				} else if attr, ok := dev.Attributes["numa"]; ok && attr.IntValue != nil {
+					info.NUMANode = *attr.IntValue
+				}
+				if attr, ok := dev.Attributes[pciBusIDAttr]; ok && attr.StringValue != nil {
+					info.PCIBusID = *attr.StringValue
+				}
+				devices = append(devices, info)
+			}
+		}
+	}
+
+	return devices, nil
+}
