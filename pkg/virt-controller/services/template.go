@@ -718,6 +718,9 @@ func (t *TemplateService) newNodeSelectorRenderer(vmi *v1.VirtualMachineInstance
 	var opts []NodeSelectorRendererOption
 	if vmi.IsCPUDedicated() {
 		opts = append(opts, WithDedicatedCPU())
+		if len(vmi.Spec.ResourceClaims) > 0 {
+			opts = append(opts, WithDRACPUClaims())
+		}
 	}
 	if t.clusterConfig.HypervStrictCheckEnabled() {
 		opts = append(opts, WithHyperv(vmi.Spec.Domain.Features))

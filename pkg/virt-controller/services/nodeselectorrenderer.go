@@ -16,6 +16,7 @@ type NodeSelectorRenderer struct {
 	cpuModelLabel          string
 	machineTypeLabel       string
 	hasDedicatedCPU        bool
+	hasDRACPUClaims        bool
 	hyperv                 bool
 	podNodeSelectors       map[string]string
 	tscFrequency           *int64
@@ -52,7 +53,7 @@ func NewNodeSelectorRenderer(
 }
 
 func (nsr *NodeSelectorRenderer) Render() map[string]string {
-	if nsr.hasDedicatedCPU {
+	if nsr.hasDedicatedCPU && !nsr.hasDRACPUClaims {
 		nsr.enableSelectorLabel(v1.CPUManager)
 	}
 	if nsr.hyperv {
@@ -140,6 +141,12 @@ func WithTDXSelector() NodeSelectorRendererOption {
 func WithDedicatedCPU() NodeSelectorRendererOption {
 	return func(renderer *NodeSelectorRenderer) {
 		renderer.hasDedicatedCPU = true
+	}
+}
+
+func WithDRACPUClaims() NodeSelectorRendererOption {
+	return func(renderer *NodeSelectorRenderer) {
+		renderer.hasDRACPUClaims = true
 	}
 }
 
