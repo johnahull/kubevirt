@@ -1156,11 +1156,33 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 	}
 
 	if vmi.Spec.Domain.CPU != nil {
-		// Adjust guest vcpu config. Currently will handle vCPUs to pCPUs pinning
-		if vmi.IsCPUDedicated() {
-			// Collect DRA device NUMA nodes from KEP-5304 metadata BEFORE
-			// topology adjustment so guest NUMA cells can be created for
-			// NUMA nodes that have DRA devices but no vCPUs.
+		hasDRAGuestMapping := vmi.Spec.Domain.CPU.NUMA != nil &&
+			vmi.Spec.Domain.CPU.NUMA.GuestMappingPassthrough != nil &&
+			len(vmi.Spec.ResourceClaims) > 0
+
+		if vmi.IsCPUDedicated() && hasDRAGuestMapping {
+			// DRA-based NUMA with dedicated CPUs: build guest NUMA cells
+			// from KEP-5304 device metadata instead of kubelet cpuset.
+			// Used when cpuManagerPolicy=none and DRA CPU driver handles pinning.
+			draNUMAOverrides := buildDRANUMAOverrides(vmi)
+			draDeviceNUMANodes := numaNodesFromOverrides(draNUMAOverrides)
+
+			if err := buildDRANUMACells(domain, vmi, c, draDeviceNUMANodes); err != nil {
+				log.Log.Reason(err).Warningf("Failed to build DRA NUMA cells, falling back to cpuset-based NUMA")
+				err = vcpu.AdjustDomainForTopologyAndCPUSet(domain, vmi, c.Topology, c.CPUSet, hasIOThreads, draDeviceNUMANodes)
+				if err != nil {
+					return err
+				}
+			}
+
+			if len(draNUMAOverrides) > 0 {
+				transformDRAOverridesToGuestCells(draNUMAOverrides, &domain.Spec, draDeviceNUMANodes)
+				if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec, draNUMAOverrides); err != nil {
+					log.Log.Reason(err).Warningf("Failed to process PCIe NUMA-aware topology, falling back to default placement")
+				}
+			}
+		} else if vmi.IsCPUDedicated() {
+			// Kubelet CPU manager-based NUMA: use cpuset from cgroup
 			var draNUMAOverrides map[string]uint32
 			var draDeviceNUMANodes map[uint32]bool
 			if c.PCINUMAAwareTopologyEnabled {
@@ -1179,9 +1201,8 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 					log.Log.Reason(err).Warningf("Failed to process PCIe NUMA-aware topology, falling back to default placement")
 				}
 			}
-		} else if vmi.Spec.Domain.CPU.NUMA != nil && vmi.Spec.Domain.CPU.NUMA.GuestMappingPassthrough != nil && len(vmi.Spec.ResourceClaims) > 0 {
-			// DRA-based NUMA: build guest NUMA cells from DRA CPU claim
-			// allocations instead of kubelet CPU manager
+		} else if hasDRAGuestMapping {
+			// DRA-based NUMA without dedicated CPUs
 			draNUMAOverrides := buildDRANUMAOverrides(vmi)
 			draDeviceNUMANodes := numaNodesFromOverrides(draNUMAOverrides)
 
@@ -1433,56 +1454,52 @@ func sortedKeys(m map[uint32]bool) []uint32 {
 // its allocated CPUs. This enables NUMA-aware guest topology without the kubelet's
 // CPU manager.
 func buildDRANUMACells(domain *api.Domain, vmi *v1.VirtualMachineInstance, c *convertertypes.ConverterContext, deviceNUMANodes map[uint32]bool) error {
-	// Discover NUMA nodes from DRA CPU claims by reading KEP-5304 metadata
+	// Discover NUMA nodes from all KEP-5304 metadata (GPUs, NICs, etc.)
 	type numaCell struct {
 		numaID uint32
 		cpus   int
 	}
 
+	allDevices, err := drautil.DiscoverNUMANodesFromAllMetadata(drautil.DefaultMetadataBasePath)
+	if err != nil {
+		log.Log.Reason(err).Warning("Failed to discover NUMA nodes from DRA metadata")
+	}
+
+	numaNodes := make(map[uint32]bool)
+	for _, dev := range allDevices {
+		if dev.NUMANode >= 0 {
+			numaNodes[uint32(dev.NUMANode)] = true
+			log.Log.Infof("DRA device %s/%s on NUMA %d (driver=%s)", dev.RequestName, dev.DeviceName, dev.NUMANode, dev.Driver)
+		}
+	}
+	if deviceNUMANodes != nil {
+		for n := range deviceNUMANodes {
+			numaNodes[n] = true
+		}
+	}
+
+	if len(numaNodes) == 0 {
+		return fmt.Errorf("no NUMA nodes discovered from DRA metadata")
+	}
+
+	cpuPerSocket := 0
+	if vmi.Spec.Domain.CPU != nil {
+		cpuPerSocket = int(vmi.Spec.Domain.CPU.Cores)
+	}
+	if cpuPerSocket == 0 {
+		cpuPerSocket = 1
+	}
+
 	var cells []numaCell
 	totalCPUs := 0
-
-	for _, rc := range vmi.Spec.ResourceClaims {
-		// Try KEP-5304 metadata first
-		numaNode, err := drautil.GetNUMANodeForClaim(
-			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, rc.Name, "cpu")
-		if err != nil {
-			// Fallback: check if claim name contains "numa" pattern (e.g., vm-cpu-numa0)
-			var n int
-			if _, scanErr := fmt.Sscanf(rc.Name, "cpu%d", &n); scanErr == nil {
-				// Claim named "cpu0", "cpu1" etc — use the index as NUMA hint
-			} else if strings.Contains(rc.Name, "numa0") {
-				n = 0
-			} else if strings.Contains(rc.Name, "numa1") {
-				n = 1
-			} else if strings.Contains(rc.Name, "numa2") {
-				n = 2
-			} else if strings.Contains(rc.Name, "numa3") {
-				n = 3
-			} else {
-				continue
-			}
-			numaNode = int64(n)
-			log.Log.Infof("DRA CPU NUMA from claim name pattern: claim=%s NUMA=%d", rc.Name, numaNode)
-		}
-
-		cpuCount := 0
-		if vmi.Spec.Domain.CPU != nil {
-			cpuCount = int(vmi.Spec.Domain.CPU.Cores)
-		}
-		if cpuCount == 0 {
-			cpuCount = 1
-		}
-
-		cells = append(cells, numaCell{numaID: uint32(numaNode), cpus: cpuCount})
-		totalCPUs += cpuCount
-
-		log.Log.Infof("DRA NUMA cell: claim=%s NUMA=%d cpus=%d", rc.Name, numaNode, cpuCount)
+	for numaID := range numaNodes {
+		cells = append(cells, numaCell{numaID: numaID, cpus: cpuPerSocket})
+		totalCPUs += cpuPerSocket
+		log.Log.Infof("DRA NUMA cell: NUMA=%d cpus=%d", numaID, cpuPerSocket)
 	}
 
-	if len(cells) == 0 {
-		return fmt.Errorf("no DRA CPU claims with NUMA metadata found")
-	}
+	// Sort cells by NUMA ID for deterministic ordering
+	sort.Slice(cells, func(i, j int) bool { return cells[i].numaID < cells[j].numaID })
 
 	// Build guest NUMA topology
 	vcpuCount := uint32(0)
