@@ -1317,6 +1317,64 @@ func GracePeriodSeconds(vmi *v1.VirtualMachineInstance) int64 {
 	return gracePeriodSeconds
 }
 
+func buildDRANUMAOverrides(vmi *v1.VirtualMachineInstance) map[string]uint32 {
+	overrides := make(map[string]uint32)
+
+	type draRef struct {
+		claimName   string
+		requestName string
+	}
+
+	var refs []draRef
+	for _, hd := range vmi.Spec.Domain.Devices.HostDevices {
+		if hd.ClaimRequest != nil && hd.ClaimRequest.ClaimName != "" && hd.ClaimRequest.RequestName != "" {
+			refs = append(refs, draRef{hd.ClaimRequest.ClaimName, hd.ClaimRequest.RequestName})
+		}
+	}
+	for _, gpu := range vmi.Spec.Domain.Devices.GPUs {
+		if gpu.ClaimRequest != nil && gpu.ClaimRequest.ClaimName != "" && gpu.ClaimRequest.RequestName != "" {
+			refs = append(refs, draRef{gpu.ClaimRequest.ClaimName, gpu.ClaimRequest.RequestName})
+		}
+	}
+
+	for _, ref := range refs {
+		pciAddr, err := drautil.GetPCIAddressForClaim(
+			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, ref.claimName, ref.requestName)
+		if err != nil {
+			continue
+		}
+
+		numaNode, err := drautil.GetNUMANodeForClaim(
+			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, ref.claimName, ref.requestName)
+		if err != nil {
+			if sysfsNUMA, sysErr := hardware.GetDeviceNumaNode(pciAddr); sysErr == nil && sysfsNUMA != nil {
+				numaNode = int64(*sysfsNUMA)
+				log.Log.V(2).Infof("DRA NUMA fallback to sysfs for %s: NUMA %d", pciAddr, numaNode)
+			} else {
+				continue
+			}
+		}
+
+		if numaNode >= 0 {
+			overrides[pciAddr] = uint32(numaNode)
+			log.Log.Infof("DRA NUMA override: device %s (claim=%s request=%s) → NUMA %d", pciAddr, ref.claimName, ref.requestName, numaNode)
+		}
+	}
+
+	return overrides
+}
+
+func numaNodesFromOverrides(overrides map[string]uint32) map[uint32]bool {
+	if len(overrides) == 0 {
+		return nil
+	}
+	nodes := make(map[uint32]bool)
+	for _, n := range overrides {
+		nodes[n] = true
+	}
+	return nodes
+}
+
 func convertCmdv1SMBIOSToComputeSMBIOS(input *cmdv1.SMBios) *compute.SMBIOS {
 	if input == nil {
 		return nil
