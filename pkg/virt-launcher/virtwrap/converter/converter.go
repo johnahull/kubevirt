@@ -1338,24 +1338,33 @@ func GracePeriodSeconds(vmi *v1.VirtualMachineInstance) int64 {
 func buildDRANUMAOverrides(vmi *v1.VirtualMachineInstance) map[string]uint32 {
 	overrides := make(map[string]uint32)
 
+	type draRef struct {
+		claimName   string
+		requestName string
+	}
+
+	var refs []draRef
 	for _, hd := range vmi.Spec.Domain.Devices.HostDevices {
-		if hd.ClaimRequest == nil || hd.ClaimRequest.ClaimName == nil || hd.ClaimRequest.RequestName == nil {
-			continue
+		if hd.ClaimRequest != nil && hd.ClaimRequest.ClaimName != nil && hd.ClaimRequest.RequestName != nil {
+			refs = append(refs, draRef{*hd.ClaimRequest.ClaimName, *hd.ClaimRequest.RequestName})
 		}
+	}
+	for _, gpu := range vmi.Spec.Domain.Devices.GPUs {
+		if gpu.ClaimName != nil && *gpu.ClaimName != "" && gpu.RequestName != nil && *gpu.RequestName != "" {
+			refs = append(refs, draRef{*gpu.ClaimName, *gpu.RequestName})
+		}
+	}
 
-		claimName := *hd.ClaimRequest.ClaimName
-		requestName := *hd.ClaimRequest.RequestName
-
+	for _, ref := range refs {
 		pciAddr, err := drautil.GetPCIAddressForClaim(
-			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, claimName, requestName)
+			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, ref.claimName, ref.requestName)
 		if err != nil {
 			continue
 		}
 
 		numaNode, err := drautil.GetNUMANodeForClaim(
-			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, claimName, requestName)
+			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, ref.claimName, ref.requestName)
 		if err != nil {
-			// Fallback: read NUMA from host sysfs when metadata doesn't have it
 			if sysfsNUMA, sysErr := hardware.GetDeviceNumaNode(pciAddr); sysErr == nil && sysfsNUMA != nil {
 				numaNode = int64(*sysfsNUMA)
 				log.Log.V(2).Infof("DRA NUMA fallback to sysfs for %s: NUMA %d", pciAddr, numaNode)
@@ -1366,7 +1375,7 @@ func buildDRANUMAOverrides(vmi *v1.VirtualMachineInstance) map[string]uint32 {
 
 		if numaNode >= 0 {
 			overrides[pciAddr] = uint32(numaNode)
-			log.Log.V(2).Infof("DRA NUMA override: device %s (claim=%s request=%s) → NUMA %d", pciAddr, claimName, requestName, numaNode)
+			log.Log.Infof("DRA NUMA override: device %s (claim=%s request=%s) → NUMA %d", pciAddr, ref.claimName, ref.requestName, numaNode)
 		}
 	}
 
