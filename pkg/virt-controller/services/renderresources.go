@@ -224,26 +224,22 @@ func WithExtraResourceClaims(vmiClaims []k8sv1.PodResourceClaim, gpus []v1.GPU, 
 	return func(r *ResourceRenderer) {
 		referenced := make(map[string]bool)
 		for _, g := range gpus {
-			if g.ClaimRequest != nil && g.ClaimRequest.ClaimName != nil {
-				referenced[*g.ClaimRequest.ClaimName] = true
+			if g.ClaimRequest != nil && g.ClaimRequest.ClaimName != "" {
+				referenced[g.ClaimRequest.ClaimName] = true
 			}
 		}
 		for _, hd := range hostDevices {
-			if hd.ClaimRequest != nil && hd.ClaimRequest.ClaimName != nil {
-				referenced[*hd.ClaimRequest.ClaimName] = true
+			if hd.ClaimRequest != nil && hd.ClaimRequest.ClaimName != "" {
+				referenced[hd.ClaimRequest.ClaimName] = true
 			}
 		}
-		resources := r.ResourceRequirements()
 		for _, rc := range vmiClaims {
 			if !referenced[rc.Name] {
-				requestResourceClaims(&resources, &k8sv1.ResourceClaim{
+				r.resourceClaims = append(r.resourceClaims, k8sv1.ResourceClaim{
 					Name: rc.Name,
 				})
 			}
 		}
-		copyResources(resources.Limits, r.calculatedLimits)
-		copyResources(resources.Requests, r.calculatedRequests)
-		copyResourceClaims(&resources, &r.resourceClaims)
 	}
 }
 

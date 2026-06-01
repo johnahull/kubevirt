@@ -26,10 +26,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	k8sv1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
-	// TODO: Replace with k8s.io types when KEP-5304 is implemented in kubernetes
 	"kubevirt.io/kubevirt/pkg/dra/metadata"
 )
 
@@ -71,6 +72,36 @@ func GetPCIAddressForClaim(
 		}
 	}
 	return "", fmt.Errorf("pciBusID not found for claim %q request %q", claimRefName, requestName)
+}
+
+// GetNUMANodeForClaim returns the NUMA node for a device in the given claim and request.
+// It reads resource.kubernetes.io/numaNode (list or scalar) from KEP-5304 metadata,
+// falling back to the driver-specific "numaNode" attribute.
+func GetNUMANodeForClaim(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (int64, error) {
+	device, err := resolveDevice(basePath, resourceClaims, claimRefName, requestName)
+	if err != nil {
+		return -1, err
+	}
+
+	numaAttr := resourcev1.QualifiedName("resource.kubernetes.io/numaNode")
+	if attr, ok := device.Attributes[numaAttr]; ok && attr.IntValue != nil {
+		return *attr.IntValue, nil
+	}
+	if attr, ok := device.Attributes["numaNode"]; ok && attr.IntValue != nil {
+		return *attr.IntValue, nil
+	}
+
+	// The standard attribute uses IntValues (list) which v0.34 DeviceAttribute
+	// doesn't support. Fall back to raw JSON extraction via the metadata path.
+	mdPath, err := resolveMetadataPath(basePath, resourceClaims, claimRefName, requestName)
+	if err == nil {
+		numaMap := extractNUMANodeLists(mdPath)
+		if nodes, ok := numaMap[device.Name]; ok && len(nodes) > 0 {
+			return nodes[0], nil
+		}
+	}
+
+	return -1, fmt.Errorf("numaNode not found for claim %q request %q", claimRefName, requestName)
 }
 
 // GetMDevUUIDForClaim returns the mdev UUID for a device in the given claim and request.
@@ -176,6 +207,26 @@ func readMetadataFromDir(basePath, claimName, requestName string) (*metadata.Dev
 	return readMetadataFile(matches[0])
 }
 
+func resolveMetadataPath(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (string, error) {
+	for _, rc := range resourceClaims {
+		if rc.Name != claimRefName {
+			continue
+		}
+		var dir string
+		if rc.ResourceClaimName != nil && *rc.ResourceClaimName != "" {
+			dir = filepath.Join(basePath, resourceClaimsSubdir, *rc.ResourceClaimName, requestName)
+		} else {
+			dir = filepath.Join(basePath, resourceClaimTemplatesSubdir, rc.Name, requestName)
+		}
+		matches, err := filepath.Glob(filepath.Join(dir, "*"+metadataFileSuffix))
+		if err != nil || len(matches) == 0 {
+			continue
+		}
+		return matches[0], nil
+	}
+	return "", fmt.Errorf("metadata path not found for claim %q request %q", claimRefName, requestName)
+}
+
 func metadataRequestNames(md *metadata.DeviceMetadata) []string {
 	names := make([]string, 0, len(md.Requests))
 	for _, req := range md.Requests {
@@ -263,8 +314,7 @@ func DiscoverNUMANodesFromAllMetadata(basePath string) ([]NUMADeviceInfo, error)
 	}
 
 	var devices []NUMADeviceInfo
-	numaAttr := resourcev1.QualifiedName("resource.kubernetes.io/numaNode")
-	pciBusIDAttr := resourcev1.QualifiedName("resource.kubernetes.io/pciBusID")
+	pciBusIDAttr := metadata.PCIBusIDAttribute
 
 	for _, file := range matches {
 		md, err := readMetadataFile(file)
@@ -272,6 +322,8 @@ func DiscoverNUMANodesFromAllMetadata(basePath string) ([]NUMADeviceInfo, error)
 			log.Log.Reason(err).Warningf("Skipping metadata file %s", file)
 			continue
 		}
+
+		numaMap := extractNUMANodeLists(file)
 
 		for _, req := range md.Requests {
 			for _, dev := range req.Devices {
@@ -281,11 +333,9 @@ func DiscoverNUMANodesFromAllMetadata(basePath string) ([]NUMADeviceInfo, error)
 					Driver:      dev.Driver,
 					NUMANode:    -1,
 				}
-				if attr, ok := dev.Attributes[numaAttr]; ok && attr.IntValue != nil {
-					info.NUMANode = *attr.IntValue
+				if nodes, ok := numaMap[dev.Name]; ok && len(nodes) > 0 {
+					info.NUMANode = nodes[0]
 				} else if attr, ok := dev.Attributes["numaNode"]; ok && attr.IntValue != nil {
-					info.NUMANode = *attr.IntValue
-				} else if attr, ok := dev.Attributes["numa"]; ok && attr.IntValue != nil {
 					info.NUMANode = *attr.IntValue
 				}
 				if attr, ok := dev.Attributes[pciBusIDAttr]; ok && attr.StringValue != nil {
@@ -297,4 +347,55 @@ func DiscoverNUMANodesFromAllMetadata(basePath string) ([]NUMADeviceInfo, error)
 	}
 
 	return devices, nil
+}
+
+// extractNUMANodeLists parses a metadata JSON file to extract
+// resource.kubernetes.io/numaNode list attributes (IntValues/ints field)
+// which may not be representable in older DeviceAttribute structs.
+func extractNUMANodeLists(path string) map[string][]int64 {
+	result := make(map[string][]int64)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return result
+	}
+
+	var raw []struct {
+		Requests []struct {
+			Devices []struct {
+				Name       string                     `json:"name"`
+				Attributes map[string]json.RawMessage `json:"attributes"`
+			} `json:"devices"`
+		} `json:"requests"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		// metadata is a JSON stream; try wrapping in array
+		wrapped := []byte("[" + string(data) + "]")
+		if err := json.Unmarshal(wrapped, &raw); err != nil {
+			return result
+		}
+	}
+
+	for _, entry := range raw {
+		for _, req := range entry.Requests {
+			for _, dev := range req.Devices {
+				numaRaw, ok := dev.Attributes["resource.kubernetes.io/numaNode"]
+				if !ok {
+					continue
+				}
+				var attr struct {
+					Ints []int64 `json:"ints"`
+					Int  *int64  `json:"int"`
+				}
+				if err := json.Unmarshal(numaRaw, &attr); err != nil {
+					continue
+				}
+				if len(attr.Ints) > 0 {
+					result[dev.Name] = attr.Ints
+				} else if attr.Int != nil {
+					result[dev.Name] = []int64{*attr.Int}
+				}
+			}
+		}
+	}
+	return result
 }

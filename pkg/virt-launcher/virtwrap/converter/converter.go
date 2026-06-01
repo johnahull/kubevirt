@@ -40,9 +40,12 @@ import (
 	"kubevirt.io/client-go/log"
 	"kubevirt.io/client-go/precond"
 
+	"sort"
+
 	cloudinit "kubevirt.io/kubevirt/pkg/cloud-init"
 	"kubevirt.io/kubevirt/pkg/config"
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
+	drautil "kubevirt.io/kubevirt/pkg/dra"
 	"kubevirt.io/kubevirt/pkg/emptydisk"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
@@ -54,6 +57,7 @@ import (
 	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
 	"kubevirt.io/kubevirt/pkg/storage/volumepath"
 	"kubevirt.io/kubevirt/pkg/util"
+	"kubevirt.io/kubevirt/pkg/util/hardware"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/compute"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/iothreads"
@@ -1520,8 +1524,24 @@ func buildDRANUMACells(domain *api.Domain, vmi *v1.VirtualMachineInstance, c *co
 		}
 	}
 
-	// Map device-only cells: they are appended after CPU cells, with empty CPUs.
-	// Only map NUMAs that don't already have a CPU cell mapping.
+	return nil
+}
+
+func transformDRAOverridesToGuestCells(overrides map[string]uint32, domainSpec *api.DomainSpec, deviceNUMANodes map[uint32]bool) {
+	if len(overrides) == 0 {
+		return
+	}
+	hostToGuest := make(map[uint32]uint32)
+
+	if domainSpec.NUMATune != nil {
+		for _, memNode := range domainSpec.NUMATune.MemNodes {
+			hostNUMA, err := strconv.ParseUint(memNode.NodeSet, 10, 32)
+			if err == nil {
+				hostToGuest[uint32(hostNUMA)] = memNode.CellID
+			}
+		}
+	}
+
 	if deviceNUMANodes != nil && domainSpec.CPU.NUMA != nil {
 		var deviceOnlyNUMAs []uint32
 		for _, numaID := range sortedKeys(deviceNUMANodes) {
@@ -1541,13 +1561,13 @@ func buildDRANUMACells(domain *api.Domain, vmi *v1.VirtualMachineInstance, c *co
 		}
 	}
 
-	log.Log.Infof("DRA hostToGuest NUMA mapping: %v", hostToGuest)
+	log.Log.V(2).Infof("DRA hostToGuest NUMA mapping: %v", hostToGuest)
 	for pciAddr, hostNUMA := range overrides {
 		if guestCell, ok := hostToGuest[hostNUMA]; ok {
-			log.Log.Infof("DRA NUMA transform: device %s host NUMA %d → guest cell %d", pciAddr, hostNUMA, guestCell)
+			log.Log.V(2).Infof("DRA NUMA transform: device %s host NUMA %d → guest cell %d", pciAddr, hostNUMA, guestCell)
 			overrides[pciAddr] = guestCell
 		} else {
-			log.Log.Infof("DRA NUMA transform: device %s host NUMA %d has NO guest mapping (will use raw host ID)", pciAddr, hostNUMA)
+			log.Log.Warningf("DRA NUMA transform: device %s host NUMA %d has no guest cell mapping", pciAddr, hostNUMA)
 		}
 	}
 }
