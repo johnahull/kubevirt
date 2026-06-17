@@ -1077,6 +1077,22 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 			isMemfdRequired = true
 		}
 	}
+	// VFIO passthrough requires locked memory and large PCI hole for GPU BARs
+	if len(vmi.Spec.Domain.Devices.GPUs) > 0 || len(vmi.Spec.Domain.Devices.HostDevices) > 0 {
+		if domain.Spec.MemoryBacking == nil {
+			domain.Spec.MemoryBacking = &api.MemoryBacking{}
+		}
+		domain.Spec.MemoryBacking.Locked = &api.Locked{}
+
+		if domain.Spec.QEMUCmd == nil {
+			domain.Spec.QEMUCmd = &api.Commandline{}
+		}
+		domain.Spec.QEMUCmd.QEMUArg = append(domain.Spec.QEMUCmd.QEMUArg,
+			api.Arg{Value: "-global"},
+			api.Arg{Value: "q35-pcihost.x-pci-hole64-size=274877906944"},
+		)
+	}
+
 	// virtiofs require shared access
 	if util.IsVMIVirtiofsEnabled(vmi) || netvmispec.HasPasstBinding(vmi) {
 		if domain.Spec.MemoryBacking == nil {
@@ -1194,8 +1210,8 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 			len(vmi.Spec.ResourceClaims) > 0
 
 		if vmi.IsCPUDedicated() && hasDRAGuestMapping {
-			draNUMAOverrides := buildDRANUMAOverrides(vmi)
-			draDeviceNUMANodes := numaNodesFromOverrides(draNUMAOverrides)
+			draOvr := buildDRAOverrides(vmi)
+			draDeviceNUMANodes := numaNodesFromOverrides(draOvr.numaNodes)
 
 			if err := buildDRANUMACells(domain, vmi, c, draDeviceNUMANodes); err != nil {
 				log.Log.Reason(err).Warningf("Failed to build DRA NUMA cells, falling back to cpuset-based NUMA")
@@ -1205,9 +1221,9 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 				}
 			}
 
-			if len(draNUMAOverrides) > 0 {
-				transformDRAOverridesToGuestCells(draNUMAOverrides, &domain.Spec, draDeviceNUMANodes)
-				if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec, draNUMAOverrides); err != nil {
+			if len(draOvr.numaNodes) > 0 {
+				transformDRAOverridesToGuestCells(draOvr.numaNodes, &domain.Spec, draDeviceNUMANodes)
+				if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec, draOvr.numaNodes, draOvr.pcieRoots); err != nil {
 					log.Log.Reason(err).Warningf("Failed to process PCIe NUMA-aware topology, falling back to default placement")
 				}
 			}
@@ -1219,10 +1235,6 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 
 			if c.PCINUMAAwareTopologyEnabled {
 				if c.Architecture.SupportPCIePlacement() {
-					// Strict PCI placement is tied to the VMI API request. At this
-					// point the request has already been converted into domain NUMA
-					// state, but deriving strictness from the XML shape would make
-					// other NUMATune users strict by accident.
 					strictPCIPlacement := vmi.Spec.Domain.CPU.NUMA != nil &&
 						vmi.Spec.Domain.CPU.NUMA.GuestMappingPassthrough != nil
 					var opts []PCIPlacementOption
@@ -1240,16 +1252,21 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 				}
 			}
 		} else if hasDRAGuestMapping {
-			draNUMAOverrides := buildDRANUMAOverrides(vmi)
-			draDeviceNUMANodes := numaNodesFromOverrides(draNUMAOverrides)
+			draOvr := buildDRAOverrides(vmi)
+			draDeviceNUMANodes := numaNodesFromOverrides(draOvr.numaNodes)
 
 			if err := buildDRANUMACells(domain, vmi, c, draDeviceNUMANodes); err != nil {
 				log.Log.Reason(err).Warningf("Failed to build DRA NUMA cells, falling back to single NUMA")
 			}
 
-			if len(draNUMAOverrides) > 0 {
-				transformDRAOverridesToGuestCells(draNUMAOverrides, &domain.Spec, draDeviceNUMANodes)
-				if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec, WithNUMAOverrides(draNUMAOverrides)); err != nil {
+			if len(draOvr.numaNodes) > 0 {
+				transformDRAOverridesToGuestCells(draOvr.numaNodes, &domain.Spec, draDeviceNUMANodes)
+				var draOpts []PCIPlacementOption
+				draOpts = append(draOpts, WithNUMAOverrides(draOvr.numaNodes))
+				if len(draOvr.pcieRoots) > 0 {
+					draOpts = append(draOpts, WithPCIeRootOverrides(draOvr.pcieRoots))
+				}
+				if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec, draOpts...); err != nil {
 					log.Log.Reason(err).Warningf("Failed to process PCIe NUMA-aware topology, falling back to default placement")
 				}
 			}
@@ -1340,8 +1357,18 @@ func GracePeriodSeconds(vmi *v1.VirtualMachineInstance) int64 {
 	return gracePeriodSeconds
 }
 
-func buildDRANUMAOverrides(vmi *v1.VirtualMachineInstance) map[string]uint32 {
-	overrides := make(map[string]uint32)
+// draOverrides holds per-device NUMA and PCIe root override maps built from
+// DRA KEP-5304 metadata.
+type draOverrides struct {
+	numaNodes map[string]uint32
+	pcieRoots map[string]string
+}
+
+func buildDRAOverrides(vmi *v1.VirtualMachineInstance) draOverrides {
+	result := draOverrides{
+		numaNodes: make(map[string]uint32),
+		pcieRoots: make(map[string]string),
+	}
 
 	type draRef struct {
 		claimName   string
@@ -1379,12 +1406,19 @@ func buildDRANUMAOverrides(vmi *v1.VirtualMachineInstance) map[string]uint32 {
 		}
 
 		if numaNode >= 0 {
-			overrides[pciAddr] = uint32(numaNode)
+			result.numaNodes[pciAddr] = uint32(numaNode)
 			log.Log.Infof("DRA NUMA override: device %s (claim=%s request=%s) → NUMA %d", pciAddr, ref.claimName, ref.requestName, numaNode)
+		}
+
+		pcieRoot, err := drautil.GetPCIeRootForClaim(
+			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, ref.claimName, ref.requestName)
+		if err == nil && pcieRoot != "" {
+			result.pcieRoots[pciAddr] = pcieRoot
+			log.Log.Infof("DRA PCIeRoot override: device %s (claim=%s request=%s) → pcieRoot %s", pciAddr, ref.claimName, ref.requestName, pcieRoot)
 		}
 	}
 
-	return overrides
+	return result
 }
 
 func numaNodesFromOverrides(overrides map[string]uint32) map[uint32]bool {

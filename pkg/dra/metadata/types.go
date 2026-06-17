@@ -55,6 +55,8 @@ type Device struct {
 const (
 	// PCIBusIDAttribute is the standard attribute for PCI device address (passthrough GPUs)
 	PCIBusIDAttribute = resourcev1.QualifiedName("resource.kubernetes.io/pciBusID")
+	// PCIeRootAttribute is the PCIe root complex the device sits behind on the host
+	PCIeRootAttribute = resourcev1.QualifiedName("resource.kubernetes.io/pcieRoot")
 	// MDevUUIDAttribute is the attribute for mediated device UUID (vGPUs)
 	// Note: This is not yet standardized under resource.kubernetes.io
 	MDevUUIDAttribute = resourcev1.QualifiedName("mdevUUID")

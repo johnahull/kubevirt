@@ -78,7 +78,7 @@ func GetPCIAddressForClaim(
 // It reads resource.kubernetes.io/numaNode (list or scalar) from KEP-5304 metadata,
 // falling back to the driver-specific "numaNode" attribute.
 func GetNUMANodeForClaim(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (int64, error) {
-	device, err := resolveDevice(basePath, resourceClaims, claimRefName, requestName)
+	device, err := resolveDeviceFromPodClaims(basePath, resourceClaims, claimRefName, requestName)
 	if err != nil {
 		return -1, err
 	}
@@ -102,6 +102,23 @@ func GetNUMANodeForClaim(basePath string, resourceClaims []k8sv1.PodResourceClai
 	}
 
 	return -1, fmt.Errorf("numaNode not found for claim %q request %q", claimRefName, requestName)
+}
+
+// GetPCIeRootForClaim returns the PCIe root complex identifier for a device in
+// the given claim and request. It reads resource.kubernetes.io/pcieRoot from
+// KEP-5304 metadata.
+func GetPCIeRootForClaim(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (string, error) {
+	device, err := resolveDeviceFromPodClaims(basePath, resourceClaims, claimRefName, requestName)
+	if err != nil {
+		return "", err
+	}
+
+	if attr, ok := device.Attributes[metadata.PCIeRootAttribute]; ok {
+		if attr.StringValue != nil && *attr.StringValue != "" {
+			return *attr.StringValue, nil
+		}
+	}
+	return "", fmt.Errorf("pcieRoot not found for claim %q request %q", claimRefName, requestName)
 }
 
 // GetMDevUUIDForClaim returns the mdev UUID for a device in the given claim and request.
@@ -161,6 +178,41 @@ func resolveDevice(
 	)
 }
 
+// resolveDeviceFromPodClaims is like resolveDevice but accepts PodResourceClaim.
+func resolveDeviceFromPodClaims(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (*metadata.Device, error) {
+	devices, err := ResolveDevices(basePath, resourceClaims, claimRefName, requestName)
+	if err != nil {
+		return nil, err
+	}
+	if len(devices) > 1 {
+		return nil, fmt.Errorf("request %q has %d devices; use ResolveDevices() for multi-device requests", requestName, len(devices))
+	}
+	return &devices[0], nil
+}
+
+// ResolveDevices returns all devices for a claim ref + request pair.
+func ResolveDevices(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) ([]metadata.Device, error) {
+	md, err := resolveClaimMetadataFromPodClaims(basePath, resourceClaims, claimRefName, requestName)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, req := range md.Requests {
+		if req.Name == requestName {
+			if len(req.Devices) == 0 {
+				return nil, fmt.Errorf("request %q has no devices", requestName)
+			}
+			return req.Devices, nil
+		}
+	}
+	return nil, fmt.Errorf(
+		"request %q not found in metadata for claim %q (available requests: %v)",
+		requestName,
+		md.Name,
+		metadataRequestNames(md),
+	)
+}
+
 // resolveClaimMetadata reads the metadata file for a claim ref + request pair.
 // Direct claims:   {base}/resourceclaims/{claimName}/{requestName}/{driverName}-metadata.json
 // Template claims: {base}/resourceclaimtemplates/{podClaimName}/{requestName}/{driverName}-metadata.json
@@ -170,6 +222,19 @@ func resolveClaimMetadata(
 	claimRefName,
 	requestName string,
 ) (*metadata.DeviceMetadata, error) {
+	for _, rc := range resourceClaims {
+		if rc.Name != claimRefName {
+			continue
+		}
+		if rc.ResourceClaimName != nil && *rc.ResourceClaimName != "" {
+			return readMetadataFromDir(filepath.Join(basePath, resourceClaimsSubdir), *rc.ResourceClaimName, requestName)
+		}
+		return readMetadataFromDir(filepath.Join(basePath, resourceClaimTemplatesSubdir), rc.Name, requestName)
+	}
+	return nil, fmt.Errorf("metadata not found for claim %q", claimRefName)
+}
+
+func resolveClaimMetadataFromPodClaims(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (*metadata.DeviceMetadata, error) {
 	for _, rc := range resourceClaims {
 		if rc.Name != claimRefName {
 			continue
@@ -294,13 +359,14 @@ func decodeMetadataFromStream(dec *json.Decoder) (*metadata.DeviceMetadata, erro
 	return nil, fmt.Errorf("no compatible metadata version found in stream (unknown versions: %s)", strings.Join(unknownVersions, ", "))
 }
 
-// NUMADeviceInfo holds device NUMA placement info from KEP-5304 metadata.
+// NUMADeviceInfo holds device NUMA and PCIe topology info from KEP-5304 metadata.
 type NUMADeviceInfo struct {
 	RequestName string
 	DeviceName  string
 	Driver      string
 	NUMANode    int64
 	PCIBusID    string
+	PCIeRoot    string
 }
 
 // DiscoverNUMANodesFromAllMetadata scans all KEP-5304 metadata files under
@@ -340,6 +406,9 @@ func DiscoverNUMANodesFromAllMetadata(basePath string) ([]NUMADeviceInfo, error)
 				}
 				if attr, ok := dev.Attributes[pciBusIDAttr]; ok && attr.StringValue != nil {
 					info.PCIBusID = *attr.StringValue
+				}
+				if attr, ok := dev.Attributes[metadata.PCIeRootAttribute]; ok && attr.StringValue != nil {
+					info.PCIeRoot = *attr.StringValue
 				}
 				devices = append(devices, info)
 			}
