@@ -329,6 +329,64 @@ var _ = Describe("DownwardAPIAttributes", func() {
 		})
 	})
 
+	Context("GetPCIeRootForClaim", func() {
+		It("should return the pcieRoot when present", func() {
+			pcieRoot := "0000:00"
+			pciAddr := "0000:01:00.0"
+			createMetadataFile("gpu-claim", "gpu-req", &metadata.DeviceMetadata{
+				ObjectMeta: metav1.ObjectMeta{Name: "gpu-claim"},
+				Requests: []metadata.DeviceMetadataRequest{{
+					Name: "gpu-req",
+					Devices: []metadata.Device{{
+						Driver: "gpu.example.com",
+						Pool:   "default",
+						Name:   "gpu-0",
+						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
+							metadata.PCIeRootAttribute: {StringValue: &pcieRoot},
+						},
+					}},
+				}},
+			})
+
+			resourceClaims := []k8sv1.PodResourceClaim{{
+				Name:              "my-claim",
+				ResourceClaimName: ptr.To("gpu-claim"),
+			}}
+
+			result, err := GetPCIeRootForClaim(tempDir, resourceClaims, "my-claim", "gpu-req")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(result).To(Equal(pcieRoot))
+		})
+
+		It("should return error when pcieRoot attribute is not present", func() {
+			pciAddr := "0000:01:00.0"
+			createMetadataFile("gpu-claim", "gpu-req", &metadata.DeviceMetadata{
+				ObjectMeta: metav1.ObjectMeta{Name: "gpu-claim"},
+				Requests: []metadata.DeviceMetadataRequest{{
+					Name: "gpu-req",
+					Devices: []metadata.Device{{
+						Driver: "gpu.example.com",
+						Pool:   "default",
+						Name:   "gpu-0",
+						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
+						},
+					}},
+				}},
+			})
+
+			resourceClaims := []k8sv1.PodResourceClaim{{
+				Name:              "my-claim",
+				ResourceClaimName: ptr.To("gpu-claim"),
+			}}
+
+			_, err := GetPCIeRootForClaim(tempDir, resourceClaims, "my-claim", "gpu-req")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("pcieRoot not found"))
+		})
+	})
+
 	Context("multiple claims and requests", func() {
 		It("should handle multiple claims with different device types", func() {
 			pciAddr := pciAddr0400

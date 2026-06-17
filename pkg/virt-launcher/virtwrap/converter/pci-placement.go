@@ -179,9 +179,10 @@ type expanderBusAssigner struct {
 	domainSpec       *api.DomainSpec
 	controllerIndex  uint32
 	controllerCount  uint32
-	topologyMap      map[uint32]*numaAwareTopology
+	topologyMap      map[string]*numaAwareTopology
 	devices          map[string]*api.HostDevice
 	devicesNUMANodes map[string]uint32
+	devicesPCIeRoots map[string]string
 
 	// lastAssignedBusNr tracks the last assigned bus number for expander buses.
 	// It starts from maxExpanderBusNr and decreases as expander buses are assigned
@@ -210,9 +211,10 @@ func newExpanderBusAssigner(domainSpec *api.DomainSpec) *expanderBusAssigner {
 
 	assigner := &expanderBusAssigner{
 		domainSpec:        domainSpec,
-		topologyMap:       make(map[uint32]*numaAwareTopology),
+		topologyMap:       make(map[string]*numaAwareTopology),
 		devices:           make(map[string]*api.HostDevice),
 		devicesNUMANodes:  make(map[string]uint32),
+		devicesPCIeRoots:  make(map[string]string),
 		controllerIndex:   currentControllerIndex,
 		controllerCount:   0,
 		lastAssignedBusNr: maxExpanderBusNr,
@@ -222,13 +224,21 @@ func newExpanderBusAssigner(domainSpec *api.DomainSpec) *expanderBusAssigner {
 }
 
 // PlacePCIDevicesWithNUMAAlignment places PCI devices in the domainSpec with
-// NUMA alignment using PCIe expander buses. It modifies the domainSpec in place
-// or leaves it unchanged in case of an error.
-func PlacePCIDevicesWithNUMAAlignment(domainSpec *api.DomainSpec, numaOverrides ...map[string]uint32) error {
+// NUMA alignment using PCIe expander buses. Devices are grouped by their PCIe
+// root complex (pcieRootOverrides); when no pcieRoot is known, devices fall
+// back to NUMA-only grouping. Each group gets its own pcie-expander-bus with
+// the correct NUMA target. It modifies the domainSpec in place or leaves it
+// unchanged in case of an error.
+func PlacePCIDevicesWithNUMAAlignment(domainSpec *api.DomainSpec, numaOverrides map[string]uint32, pcieRootOverrides ...map[string]string) error {
 	assigner := newExpanderBusAssigner(domainSpec)
-	for _, overrides := range numaOverrides {
-		for addr, node := range overrides {
+	if numaOverrides != nil {
+		for addr, node := range numaOverrides {
 			assigner.devicesNUMANodes[addr] = node
+		}
+	}
+	for _, overrides := range pcieRootOverrides {
+		for addr, root := range overrides {
+			assigner.devicesPCIeRoots[addr] = root
 		}
 	}
 	return assigner.PlaceNumaAlignedDevices()
@@ -288,39 +298,81 @@ func (a *expanderBusAssigner) addDevices(devices []api.HostDevice) {
 		if numaNode, exists := numaNodes[address]; exists {
 			a.devices[address] = device
 			a.devicesNUMANodes[address] = numaNode
+		} else if _, hasOverride := a.devicesNUMANodes[address]; hasOverride {
+			a.devices[address] = device
 		} else {
 			log.Log.Infof("device %s has no NUMA affinity information, skipping for pcie-expander-bus assignment", address)
 		}
 	}
 }
 
-// numaDeviceGroups represents a mapping of NUMA nodes to host devices.
-type numaDeviceGroups map[uint32][]*api.HostDevice
+// topologyDeviceGroups represents a mapping of topology keys to host devices.
+// The key is a pcieRoot string when available, or "numa:<N>" as a fallback.
+type topologyDeviceGroups map[string][]*api.HostDevice
 
-// groupDevicesByNUMA groups devices by their NUMA node.
-func (a *expanderBusAssigner) groupDevicesByNUMA() numaDeviceGroups {
-	groups := make(numaDeviceGroups)
+// topologyKey returns the grouping key for a device. Devices with a known
+// pcieRoot are grouped by that root; devices without fall back to NUMA-only
+// grouping using a synthetic "numa:<N>" key.
+func (a *expanderBusAssigner) topologyKey(addressKey string) (string, bool) {
+	if root, ok := a.devicesPCIeRoots[addressKey]; ok && root != "" {
+		return root, true
+	}
+	if numaNode, ok := a.devicesNUMANodes[addressKey]; ok {
+		return fmt.Sprintf("numa:%d", numaNode), true
+	}
+	return "", false
+}
+
+// numaNodeForTopologyKey returns the NUMA node associated with a topology key.
+// For pcieRoot keys it looks up the NUMA node of any device behind that root.
+// For synthetic "numa:<N>" keys it parses the node from the key itself.
+// The bool return indicates whether a NUMA node was found.
+func (a *expanderBusAssigner) numaNodeForTopologyKey(key string) (uint32, bool) {
+	for addr, root := range a.devicesPCIeRoots {
+		if root == key {
+			if node, ok := a.devicesNUMANodes[addr]; ok {
+				return node, true
+			}
+		}
+	}
+	var n uint32
+	if _, err := fmt.Sscanf(key, "numa:%d", &n); err == nil {
+		return n, true
+	}
+	return 0, false
+}
+
+// groupDevicesByTopology groups devices by their PCIe root complex, falling
+// back to NUMA node when pcieRoot metadata is not available.
+func (a *expanderBusAssigner) groupDevicesByTopology() topologyDeviceGroups {
+	groups := make(topologyDeviceGroups)
 	for addressKey, device := range a.devices {
-		numaNode, exists := a.devicesNUMANodes[addressKey]
-		if !exists {
+		key, ok := a.topologyKey(addressKey)
+		if !ok {
+			log.Log.Infof("device %s has no pcieRoot or NUMA mapping, skipping topology-aligned placement", addressKey)
 			continue
 		}
-		groups[numaNode] = append(groups[numaNode], device)
+		groups[key] = append(groups[key], device)
 	}
 	return groups
 }
 
 // getNumaAwareTopology handles NUMA aware topology retrieval or creation
 // from the topology map. It creates an expander bus if the topology for that
-// NUMA node doesn't exist and returns that topology.
-func (a *expanderBusAssigner) getNumaAwareTopology(numaKey uint32) *numaAwareTopology {
-	topology, exists := a.topologyMap[numaKey]
+// key doesn't exist and returns that topology. The expander bus target is
+// set to the NUMA node associated with the topology key.
+func (a *expanderBusAssigner) getNumaAwareTopology(topoKey string) *numaAwareTopology {
+	topology, exists := a.topologyMap[topoKey]
 	if !exists {
+		numaNode, ok := a.numaNodeForTopologyKey(topoKey)
+		if !ok {
+			log.Log.Warningf("topology key %q has no NUMA mapping, defaulting to NUMA 0", topoKey)
+		}
 		topology = &numaAwareTopology{
-			expanderBus:               a.createController(api.ControllerModelPCIeExpanderBus, "", 0, &numaKey),
+			expanderBus:               a.createController(api.ControllerModelPCIeExpanderBus, "", 0, &numaNode),
 			addressPerDeviceSourcePCI: make(map[string]*api.Address),
 		}
-		a.topologyMap[numaKey] = topology
+		a.topologyMap[topoKey] = topology
 	}
 	return topology
 }
@@ -347,19 +399,20 @@ func (a *expanderBusAssigner) placeDevice(topology *numaAwareTopology, device *a
 	return nil
 }
 
-// buildTopology groups devices by NUMA node by using a pcie-expander-bus per
-// NUMA node. Within a pcie-expander-bus one pcie-root-port per device is created.
-// Each device is then placed behind its respective root port.
+// buildTopology groups devices by PCIe root complex (falling back to NUMA
+// node) using a pcie-expander-bus per group. Within a pcie-expander-bus one
+// pcie-root-port per device is created. Each device is then placed behind
+// its respective root port.
 //
-// pcie-expander-bus (one per NUMA node) -> pcie-root-port (one per device) -> device
+// pcie-expander-bus (one per pcieRoot/NUMA group) -> pcie-root-port (one per device) -> device
 //
-// It modifies the topology per NUMA node in place by creating the necessary controllers
+// It modifies the topology in place by creating the necessary controllers
 // and updating the addresses of the devices.
 func (a *expanderBusAssigner) buildTopology() error {
-	numaDeviceGroups := a.groupDevicesByNUMA()
+	topoGroups := a.groupDevicesByTopology()
 
-	for numaKey, devices := range numaDeviceGroups {
-		topology := a.getNumaAwareTopology(numaKey)
+	for topoKey, devices := range topoGroups {
+		topology := a.getNumaAwareTopology(topoKey)
 
 		for _, device := range devices {
 			if err := a.placeDevice(topology, device); err != nil {
