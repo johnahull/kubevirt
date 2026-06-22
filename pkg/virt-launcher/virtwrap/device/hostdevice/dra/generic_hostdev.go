@@ -23,9 +23,9 @@ import (
 	"fmt"
 
 	v1 "kubevirt.io/api/core/v1"
-	"kubevirt.io/client-go/log"
 
 	drautil "kubevirt.io/kubevirt/pkg/dra"
+	"kubevirt.io/kubevirt/pkg/dra/metadata"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device"
 )
@@ -47,13 +47,11 @@ func CreateDRAHostDevices(vmi *v1.VirtualMachineInstance, basePath string) ([]ap
 			continue
 		}
 
-		hostDevice, err := createHostDeviceForHostDevice(hd, basePath, vmi.Spec)
+		devs, err := createHostDevicesForHostDevice(hd, basePath, vmi.Spec)
 		if err != nil {
 			return nil, fmt.Errorf(failedCreateGenericHostDevicesFmt, err)
 		}
-		if hostDevice != nil {
-			hostDevices = append(hostDevices, *hostDevice)
-		}
+		hostDevices = append(hostDevices, devs...)
 	}
 
 	if err := validateCreationOfDRAHostDevices(vmi.Spec.Domain.Devices.HostDevices, hostDevices); err != nil {
@@ -63,7 +61,7 @@ func CreateDRAHostDevices(vmi *v1.VirtualMachineInstance, basePath string) ([]ap
 	return hostDevices, nil
 }
 
-func createHostDeviceForHostDevice(hd v1.HostDevice, basePath string, vmiSpecs v1.VirtualMachineInstanceSpec) (*api.HostDevice, error) {
+func createHostDevicesForHostDevice(hd v1.HostDevice, basePath string, vmiSpecs v1.VirtualMachineInstanceSpec) ([]api.HostDevice, error) {
 	if hd.ClaimRequest == nil || hd.ClaimRequest.ClaimName == "" || hd.ClaimRequest.RequestName == "" {
 		return nil, fmt.Errorf("HostDevice %s has incomplete ClaimRequest", hd.Name)
 	}
@@ -72,45 +70,53 @@ func createHostDeviceForHostDevice(hd v1.HostDevice, basePath string, vmiSpecs v
 	requestName := hd.ClaimRequest.RequestName
 	resourceClaims := vmiSpecs.ResourceClaims
 
-	// Check mdevUUID first: a device with both pciBusID and mdevUUID is a
-	// mediated (vGPU) device whose parent happens to expose pciBusID. Treating
-	// it as PCI passthrough would be incorrect.
-	mdevUUID, mdevErr := drautil.GetMDevUUIDForClaim(basePath, resourceClaims, claimName, requestName)
-	if mdevErr == nil {
-		log.Log.V(2).Infof("Adding DRA MDEV HostDevice for %s", hd.Name)
-		model := "vfio-pci"
-		if vmiSpecs.Architecture == "s390x" {
-			model = "vfio-ap"
+	devices, err := drautil.ResolveDevices(basePath, resourceClaims, claimName, requestName)
+	if err != nil {
+		return nil, fmt.Errorf("HostDevice %s: %w", hd.Name, err)
+	}
+
+	var hostDevices []api.HostDevice
+	for i, dev := range devices {
+		suffix := hd.Name
+		if len(devices) > 1 {
+			suffix = fmt.Sprintf("%s-%d", hd.Name, i)
 		}
-		return &api.HostDevice{
-			Alias: api.NewUserDefinedAlias(DRAHostDeviceAliasPrefix + hd.Name),
-			Source: api.HostDeviceSource{
-				Address: &api.Address{
-					UUID: mdevUUID,
+
+		if attr, ok := dev.Attributes[metadata.MDevUUIDAttribute]; ok && attr.StringValue != nil && *attr.StringValue != "" {
+			model := "vfio-pci"
+			if vmiSpecs.Architecture == "s390x" {
+				model = "vfio-ap"
+			}
+			hostDevices = append(hostDevices, api.HostDevice{
+				Alias: api.NewUserDefinedAlias(DRAHostDeviceAliasPrefix + suffix),
+				Source: api.HostDeviceSource{
+					Address: &api.Address{UUID: *attr.StringValue},
 				},
-			},
-			Type:  api.HostDeviceMDev,
-			Mode:  "subsystem",
-			Model: model,
-		}, nil
-	}
-
-	pciAddr, pciErr := drautil.GetPCIAddressForClaim(basePath, resourceClaims, claimName, requestName)
-	if pciErr == nil {
-		log.Log.V(2).Infof("Adding DRA PCI HostDevice for %s", hd.Name)
-		hostAddr, err := device.NewPciAddressField(pciAddr)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create PCI device for %s: %v", hd.Name, err)
+				Type:  api.HostDeviceMDev,
+				Mode:  "subsystem",
+				Model: model,
+			})
+			continue
 		}
-		return &api.HostDevice{
-			Alias:   api.NewUserDefinedAlias(DRAHostDeviceAliasPrefix + hd.Name),
-			Source:  api.HostDeviceSource{Address: hostAddr},
-			Type:    api.HostDevicePCI,
-			Managed: "no",
-		}, nil
+
+		if attr, ok := dev.Attributes[metadata.PCIBusIDAttribute]; ok && attr.StringValue != nil && *attr.StringValue != "" {
+			hostAddr, addrErr := device.NewPciAddressField(*attr.StringValue)
+			if addrErr != nil {
+				return nil, fmt.Errorf("failed to create PCI device for %s: %v", suffix, addrErr)
+			}
+			hostDevices = append(hostDevices, api.HostDevice{
+				Alias:   api.NewUserDefinedAlias(DRAHostDeviceAliasPrefix + suffix),
+				Source:  api.HostDeviceSource{Address: hostAddr},
+				Type:    api.HostDevicePCI,
+				Managed: "no",
+			})
+			continue
+		}
+
+		return nil, fmt.Errorf("HostDevice %s device %d has no mdevUUID or pciBusID in metadata", hd.Name, i)
 	}
 
-	return nil, fmt.Errorf("HostDevice %s has no mdevUUID or pciBusID in metadata for claim %s request %s (mdev: %v, pci: %v)", hd.Name, claimName, requestName, mdevErr, pciErr)
+	return hostDevices, nil
 }
 
 func validateCreationOfDRAHostDevices(genericHostDevices []v1.HostDevice, hostDevices []api.HostDevice) error {
@@ -121,8 +127,8 @@ func validateCreationOfDRAHostDevices(genericHostDevices []v1.HostDevice, hostDe
 		}
 	}
 
-	if len(hostDevsWithDRA) > 0 && len(hostDevsWithDRA) != len(hostDevices) {
-		return fmt.Errorf("the number of DRA HostDevice/s do not match the number of devices:\nHostDevice: %v\nDevice: %v", hostDevsWithDRA, hostDevices)
+	if len(hostDevsWithDRA) > 0 && len(hostDevices) < len(hostDevsWithDRA) {
+		return fmt.Errorf("fewer devices created (%d) than DRA HostDevice entries (%d)", len(hostDevices), len(hostDevsWithDRA))
 	}
 	return nil
 }
