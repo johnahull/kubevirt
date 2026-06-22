@@ -349,7 +349,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				}},
 			})
 
-			resourceClaims := []k8sv1.PodResourceClaim{{
+			resourceClaims := []v1.VirtualMachineInstanceResourceClaim{{
 				Name:              "my-claim",
 				ResourceClaimName: ptr.To("gpu-claim"),
 			}}
@@ -376,7 +376,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				}},
 			})
 
-			resourceClaims := []k8sv1.PodResourceClaim{{
+			resourceClaims := []v1.VirtualMachineInstanceResourceClaim{{
 				Name:              "my-claim",
 				ResourceClaimName: ptr.To("gpu-claim"),
 			}}

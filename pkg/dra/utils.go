@@ -24,9 +24,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
-	k8sv1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
@@ -77,8 +77,8 @@ func GetPCIAddressForClaim(
 // GetNUMANodeForClaim returns the NUMA node for a device in the given claim and request.
 // It reads resource.kubernetes.io/numaNode (list or scalar) from KEP-5304 metadata,
 // falling back to the driver-specific "numaNode" attribute.
-func GetNUMANodeForClaim(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (int64, error) {
-	device, err := resolveDeviceFromPodClaims(basePath, resourceClaims, claimRefName, requestName)
+func GetNUMANodeForClaim(basePath string, resourceClaims []v1.VirtualMachineInstanceResourceClaim, claimRefName, requestName string) (int64, error) {
+	device, err := resolveDevice(basePath, resourceClaims, claimRefName, requestName)
 	if err != nil {
 		return -1, err
 	}
@@ -93,7 +93,7 @@ func GetNUMANodeForClaim(basePath string, resourceClaims []k8sv1.PodResourceClai
 
 	// The standard attribute uses IntValues (list) which v0.34 DeviceAttribute
 	// doesn't support. Fall back to raw JSON extraction via the metadata path.
-	mdPath, err := resolveMetadataPath(basePath, resourceClaims, claimRefName, requestName)
+	mdPath, err := resolveVMIMetadataPath(basePath, resourceClaims, claimRefName, requestName)
 	if err == nil {
 		numaMap := extractNUMANodeLists(mdPath)
 		if nodes, ok := numaMap[device.Name]; ok && len(nodes) > 0 {
@@ -107,8 +107,8 @@ func GetNUMANodeForClaim(basePath string, resourceClaims []k8sv1.PodResourceClai
 // GetPCIeRootForClaim returns the PCIe root complex identifier for a device in
 // the given claim and request. It reads resource.kubernetes.io/pcieRoot from
 // KEP-5304 metadata.
-func GetPCIeRootForClaim(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (string, error) {
-	device, err := resolveDeviceFromPodClaims(basePath, resourceClaims, claimRefName, requestName)
+func GetPCIeRootForClaim(basePath string, resourceClaims []v1.VirtualMachineInstanceResourceClaim, claimRefName, requestName string) (string, error) {
+	device, err := resolveDevice(basePath, resourceClaims, claimRefName, requestName)
 	if err != nil {
 		return "", err
 	}
@@ -178,21 +178,9 @@ func resolveDevice(
 	)
 }
 
-// resolveDeviceFromPodClaims is like resolveDevice but accepts PodResourceClaim.
-func resolveDeviceFromPodClaims(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (*metadata.Device, error) {
-	devices, err := ResolveDevices(basePath, resourceClaims, claimRefName, requestName)
-	if err != nil {
-		return nil, err
-	}
-	if len(devices) > 1 {
-		return nil, fmt.Errorf("request %q has %d devices; use ResolveDevices() for multi-device requests", requestName, len(devices))
-	}
-	return &devices[0], nil
-}
-
 // ResolveDevices returns all devices for a claim ref + request pair.
-func ResolveDevices(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) ([]metadata.Device, error) {
-	md, err := resolveClaimMetadataFromPodClaims(basePath, resourceClaims, claimRefName, requestName)
+func ResolveDevices(basePath string, resourceClaims []v1.VirtualMachineInstanceResourceClaim, claimRefName, requestName string) ([]metadata.Device, error) {
+	md, err := resolveClaimMetadata(basePath, resourceClaims, claimRefName, requestName)
 	if err != nil {
 		return nil, err
 	}
@@ -234,19 +222,6 @@ func resolveClaimMetadata(
 	return nil, fmt.Errorf("metadata not found for claim %q", claimRefName)
 }
 
-func resolveClaimMetadataFromPodClaims(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (*metadata.DeviceMetadata, error) {
-	for _, rc := range resourceClaims {
-		if rc.Name != claimRefName {
-			continue
-		}
-		if rc.ResourceClaimName != nil && *rc.ResourceClaimName != "" {
-			return readMetadataFromDir(filepath.Join(basePath, resourceClaimsSubdir), *rc.ResourceClaimName, requestName)
-		}
-		return readMetadataFromDir(filepath.Join(basePath, resourceClaimTemplatesSubdir), rc.Name, requestName)
-	}
-	return nil, fmt.Errorf("metadata not found for claim %q", claimRefName)
-}
-
 // readMetadataFromDir reads the single metadata file matching
 // {basePath}/{claimName}/{requestName}/*-metadata.json.
 // KubeVirt expects exactly one driver per request; multiple files indicate
@@ -272,7 +247,7 @@ func readMetadataFromDir(basePath, claimName, requestName string) (*metadata.Dev
 	return readMetadataFile(matches[0])
 }
 
-func resolveMetadataPath(basePath string, resourceClaims []k8sv1.PodResourceClaim, claimRefName, requestName string) (string, error) {
+func resolveVMIMetadataPath(basePath string, resourceClaims []v1.VirtualMachineInstanceResourceClaim, claimRefName, requestName string) (string, error) {
 	for _, rc := range resourceClaims {
 		if rc.Name != claimRefName {
 			continue
@@ -467,4 +442,54 @@ func extractNUMANodeLists(path string) map[string][]int64 {
 		}
 	}
 	return result
+}
+
+const defaultNodeBasePath = "/sys/devices/system/node"
+
+// ReadHostSLITDistances reads the NUMA distance (SLIT) table from sysfs.
+// Returns a map where distances[nodeID][i] is the distance from nodeID to node i.
+func ReadHostSLITDistances(basePath string) (map[int][]int, error) {
+	if basePath == "" {
+		basePath = defaultNodeBasePath
+	}
+
+	nodes, err := filepath.Glob(filepath.Join(basePath, "node*"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to glob NUMA nodes: %w", err)
+	}
+
+	distances := make(map[int][]int)
+
+	for _, nodePath := range nodes {
+		nodeIDStr := strings.TrimPrefix(filepath.Base(nodePath), "node")
+		nodeID, err := strconv.Atoi(nodeIDStr)
+		if err != nil {
+			continue
+		}
+
+		data, err := os.ReadFile(filepath.Join(nodePath, "distance"))
+		if err != nil {
+			log.Log.V(2).Infof("Failed to read SLIT for node %d: %v", nodeID, err)
+			continue
+		}
+
+		fields := strings.Fields(strings.TrimSpace(string(data)))
+		nodeDistances := make([]int, 0, len(fields))
+		parseErr := false
+		for _, field := range fields {
+			dist, err := strconv.Atoi(field)
+			if err != nil {
+				log.Log.V(2).Infof("Malformed distance value %q for node %d, skipping node", field, nodeID)
+				parseErr = true
+				break
+			}
+			nodeDistances = append(nodeDistances, dist)
+		}
+
+		if !parseErr && len(nodeDistances) > 0 {
+			distances[nodeID] = nodeDistances
+		}
+	}
+
+	return distances, nil
 }

@@ -26,6 +26,7 @@ import (
 	"kubevirt.io/client-go/log"
 
 	drautil "kubevirt.io/kubevirt/pkg/dra"
+	"kubevirt.io/kubevirt/pkg/dra/metadata"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device"
 )
@@ -49,13 +50,11 @@ func CreateDRAGPUHostDevices(vmi *v1.VirtualMachineInstance, basePath string) ([
 			continue
 		}
 
-		hostDevice, err := createHostDeviceForGPU(gpu, basePath, vmi.Spec.ResourceClaims)
+		devs, err := createHostDevicesForGPU(gpu, basePath, vmi.Spec.ResourceClaims)
 		if err != nil {
 			return nil, fmt.Errorf(failedCreateGPUHostDeviceFmt, err)
 		}
-		if hostDevice != nil {
-			hostDevices = append(hostDevices, *hostDevice)
-		}
+		hostDevices = append(hostDevices, devs...)
 	}
 
 	if err := validateCreationOfDRAGPUDevices(vmi.Spec.Domain.Devices.GPUs, hostDevices); err != nil {
@@ -76,7 +75,7 @@ func CreateDRAGPUHostDevices(vmi *v1.VirtualMachineInstance, basePath string) ([
 	return hostDevices, nil
 }
 
-func createHostDeviceForGPU(gpu v1.GPU, basePath string, resourceClaims []v1.VirtualMachineInstanceResourceClaim) (*api.HostDevice, error) {
+func createHostDevicesForGPU(gpu v1.GPU, basePath string, resourceClaims []v1.VirtualMachineInstanceResourceClaim) ([]api.HostDevice, error) {
 	if gpu.ClaimRequest == nil || gpu.ClaimRequest.ClaimName == "" || gpu.ClaimRequest.RequestName == "" {
 		return nil, fmt.Errorf("GPU %s has incomplete ClaimRequest", gpu.Name)
 	}
@@ -84,52 +83,61 @@ func createHostDeviceForGPU(gpu v1.GPU, basePath string, resourceClaims []v1.Vir
 	claimName := gpu.ClaimRequest.ClaimName
 	requestName := gpu.ClaimRequest.RequestName
 
-	// Check mdevUUID first: a device with both pciBusID and mdevUUID is a
-	// mediated (vGPU) device whose parent happens to expose pciBusID. Treating
-	// it as PCI passthrough would be incorrect.
-	mdevUUID, mdevErr := drautil.GetMDevUUIDForClaim(basePath, resourceClaims, claimName, requestName)
-	if mdevErr == nil {
-		log.Log.V(2).Infof("Adding DRA MDEV GPU device for %s", gpu.Name)
-		hostDevice := api.HostDevice{
-			Alias: api.NewUserDefinedAlias(AliasPrefix + gpu.Name),
-			Source: api.HostDeviceSource{
-				Address: &api.Address{
-					UUID: mdevUUID,
-				},
-			},
-			Type:  api.HostDeviceMDev,
-			Mode:  "subsystem",
-			Model: "vfio-pci",
+	devices, err := drautil.ResolveDevices(basePath, resourceClaims, claimName, requestName)
+	if err != nil {
+		return nil, fmt.Errorf("GPU %s: %w", gpu.Name, err)
+	}
+
+	var hostDevices []api.HostDevice
+	for i, dev := range devices {
+		suffix := gpu.Name
+		if len(devices) > 1 {
+			suffix = fmt.Sprintf("%s-%d", gpu.Name, i)
 		}
 
-		if gpu.VirtualGPUOptions != nil && gpu.VirtualGPUOptions.Display != nil {
-			displayEnabled := gpu.VirtualGPUOptions.Display.Enabled
-			if displayEnabled == nil || *displayEnabled {
-				hostDevice.Display = "on"
-				if gpu.VirtualGPUOptions.Display.RamFB == nil || *gpu.VirtualGPUOptions.Display.RamFB.Enabled {
-					hostDevice.RamFB = "on"
+		if attr, ok := dev.Attributes[metadata.MDevUUIDAttribute]; ok && attr.StringValue != nil && *attr.StringValue != "" {
+			log.Log.V(2).Infof("Adding DRA MDEV GPU device for %s", suffix)
+			hostDevice := api.HostDevice{
+				Alias: api.NewUserDefinedAlias(AliasPrefix + suffix),
+				Source: api.HostDeviceSource{
+					Address: &api.Address{UUID: *attr.StringValue},
+				},
+				Type:  api.HostDeviceMDev,
+				Mode:  "subsystem",
+				Model: "vfio-pci",
+			}
+			if gpu.VirtualGPUOptions != nil && gpu.VirtualGPUOptions.Display != nil {
+				displayEnabled := gpu.VirtualGPUOptions.Display.Enabled
+				if displayEnabled == nil || *displayEnabled {
+					hostDevice.Display = "on"
+					if gpu.VirtualGPUOptions.Display.RamFB == nil || *gpu.VirtualGPUOptions.Display.RamFB.Enabled {
+						hostDevice.RamFB = "on"
+					}
 				}
 			}
+			hostDevices = append(hostDevices, hostDevice)
+			continue
 		}
-		return &hostDevice, nil
+
+		if attr, ok := dev.Attributes[metadata.PCIBusIDAttribute]; ok && attr.StringValue != nil && *attr.StringValue != "" {
+			log.Log.V(2).Infof("Adding DRA PCI GPU device for %s", suffix)
+			hostAddr, addrErr := device.NewPciAddressField(*attr.StringValue)
+			if addrErr != nil {
+				return nil, fmt.Errorf("failed to create PCI device for %s: %v", suffix, addrErr)
+			}
+			hostDevices = append(hostDevices, api.HostDevice{
+				Alias:   api.NewUserDefinedAlias(AliasPrefix + suffix),
+				Source:  api.HostDeviceSource{Address: hostAddr},
+				Type:    api.HostDevicePCI,
+				Managed: "no",
+			})
+			continue
+		}
+
+		return nil, fmt.Errorf("GPU %s device %d has no mdevUUID or pciBusID in metadata", gpu.Name, i)
 	}
 
-	pciAddr, pciErr := drautil.GetPCIAddressForClaim(basePath, resourceClaims, claimName, requestName)
-	if pciErr == nil {
-		log.Log.V(2).Infof("Adding DRA PCI GPU device for %s", gpu.Name)
-		hostAddr, err := device.NewPciAddressField(pciAddr)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create PCI device for %s: %v", gpu.Name, err)
-		}
-		return &api.HostDevice{
-			Alias:   api.NewUserDefinedAlias(AliasPrefix + gpu.Name),
-			Source:  api.HostDeviceSource{Address: hostAddr},
-			Type:    api.HostDevicePCI,
-			Managed: "no",
-		}, nil
-	}
-
-	return nil, fmt.Errorf("GPU %s has no mdevUUID or pciBusID in metadata for claim %s request %s (mdev: %v, pci: %v)", gpu.Name, claimName, requestName, mdevErr, pciErr)
+	return hostDevices, nil
 }
 
 func hasGPUsWithDRA(vmi *v1.VirtualMachineInstance) bool {
