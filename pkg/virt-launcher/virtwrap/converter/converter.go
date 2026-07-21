@@ -29,15 +29,21 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
+	"strconv"
+	"strings"
 	"syscall"
 
+	k8sv1 "k8s.io/api/core/v1"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 	"kubevirt.io/client-go/precond"
 
+	drautil "kubevirt.io/kubevirt/pkg/dra"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	"kubevirt.io/kubevirt/pkg/os/disk"
 	"kubevirt.io/kubevirt/pkg/util"
+	"kubevirt.io/kubevirt/pkg/util/hardware"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/compute"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter/iothreads"
@@ -300,36 +306,56 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 		return err
 	}
 
-	if vmi.Spec.Domain.CPU != nil && vmi.IsCPUDedicated() {
-		// Adjust guest vcpu config. Currently will handle vCPUs to pCPUs pinning
-		if err := vcpu.AdjustDomainForTopologyAndCPUSet(domain, vmi, c.Topology, c.CPUSet); err != nil {
-			return err
-		}
+	if vmi.Spec.Domain.CPU != nil {
+		hasDRAGuestMapping := vmi.Spec.Domain.CPU.NUMA != nil &&
+			vmi.Spec.Domain.CPU.NUMA.GuestMappingPassthrough != nil &&
+			len(vmi.Spec.ResourceClaims) > 0
 
-		if graceIOVirtualizationRequested(c) {
-			return configureGraceIOVirtualization(&domain.Spec, c.GraceHostDeviceAliases, c.IOMMUFDEnabled)
-		}
+		if vmi.IsCPUDedicated() && hasDRAGuestMapping {
+			if graceIOVirtualizationRequested(c) {
+				return configureGraceIOVirtualization(&domain.Spec, c.GraceHostDeviceAliases, c.IOMMUFDEnabled)
+			}
 
-		if c.PCINUMAAwareTopologyEnabled {
-			if c.Architecture.SupportPCIePlacement() {
-				// Strict PCI placement is tied to the VMI API request. At this
-				// point the request has already been converted into domain NUMA
-				// state, but deriving strictness from the XML shape would make
-				// other NUMATune users strict by accident.
-				strictPCIPlacement := vmi.Spec.Domain.CPU.NUMA != nil &&
-					vmi.Spec.Domain.CPU.NUMA.GuestMappingPassthrough != nil
-				var opts []PCIPlacementOption
-				if strictPCIPlacement {
-					opts = append(opts, WithStrictPCINUMAPlacement())
-				}
-				if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec, opts...); err != nil {
-					if strictPCIPlacement {
-						return fmt.Errorf("failed to process strict PCIe NUMA-aware topology: %w", err)
-					}
-					log.Log.Reason(err).Warningf("Failed to process PCIe NUMA-aware topology, falling back to default placement")
+			if err := buildDRANUMACells(domain, vmi, c, nil); err != nil {
+				log.Log.Reason(err).Warningf("Failed to build DRA NUMA cells, falling back to cpuset-based NUMA")
+				if err := vcpu.AdjustDomainForTopologyAndCPUSet(domain, vmi, c.Topology, c.CPUSet); err != nil {
+					return err
 				}
 			} else {
-				log.Log.Infof("Skipping PCIe NUMA alignment: architecture %s does not support PCIe placement", c.Architecture.GetArchitecture())
+				applyDRANUMATopology(domain, vmi)
+			}
+		} else if vmi.IsCPUDedicated() {
+			if err := vcpu.AdjustDomainForTopologyAndCPUSet(domain, vmi, c.Topology, c.CPUSet); err != nil {
+				return err
+			}
+
+			if graceIOVirtualizationRequested(c) {
+				return configureGraceIOVirtualization(&domain.Spec, c.GraceHostDeviceAliases, c.IOMMUFDEnabled)
+			}
+
+			if c.PCINUMAAwareTopologyEnabled {
+				if c.Architecture.SupportPCIePlacement() {
+					strictPCIPlacement := vmi.Spec.Domain.CPU.NUMA != nil &&
+						vmi.Spec.Domain.CPU.NUMA.GuestMappingPassthrough != nil
+					var opts []PCIPlacementOption
+					if strictPCIPlacement {
+						opts = append(opts, WithStrictPCINUMAPlacement())
+					}
+					if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec, opts...); err != nil {
+						if strictPCIPlacement {
+							return fmt.Errorf("failed to process strict PCIe NUMA-aware topology: %w", err)
+						}
+						log.Log.Reason(err).Warningf("Failed to process PCIe NUMA-aware topology, falling back to default placement")
+					}
+				} else {
+					log.Log.Infof("Skipping PCIe NUMA alignment: architecture %s does not support PCIe placement", c.Architecture.GetArchitecture())
+				}
+			}
+		} else if hasDRAGuestMapping {
+			if err := buildDRANUMACells(domain, vmi, c, nil); err != nil {
+				log.Log.Reason(err).Warningf("Failed to build DRA NUMA cells")
+			} else {
+				applyDRANUMATopology(domain, vmi)
 			}
 		}
 	}
@@ -345,6 +371,267 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 	}
 
 	return nil
+}
+
+// buildDRANUMAOverrides extracts NUMA node information from DRA device
+// metadata for all DRA-backed host devices and GPUs, keyed by PCI address.
+func buildDRANUMAOverrides(vmi *v1.VirtualMachineInstance) map[string]uint32 {
+	overrides := make(map[string]uint32)
+
+	type draRef struct {
+		claimName   string
+		requestName string
+	}
+
+	var refs []draRef
+	for _, hd := range vmi.Spec.Domain.Devices.HostDevices {
+		if drautil.IsHostDeviceDRA(hd) {
+			refs = append(refs, draRef{hd.ClaimRequest.ClaimName, hd.ClaimRequest.RequestName})
+		}
+	}
+	for _, gpu := range vmi.Spec.Domain.Devices.GPUs {
+		if drautil.IsGPUDRA(gpu) {
+			refs = append(refs, draRef{gpu.ClaimRequest.ClaimName, gpu.ClaimRequest.RequestName})
+		}
+	}
+
+	for _, ref := range refs {
+		pciAddr, err := drautil.GetPCIAddressForClaim(
+			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, ref.claimName, ref.requestName)
+		if err != nil {
+			continue
+		}
+
+		numaNode, err := drautil.GetNUMANodeForClaim(
+			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, ref.claimName, ref.requestName)
+		if err != nil {
+			if sysfsNUMA, sysErr := hardware.GetDeviceNumaNode(pciAddr); sysErr == nil && sysfsNUMA != nil {
+				numaNode = int64(*sysfsNUMA)
+				log.Log.V(2).Infof("DRA NUMA fallback to sysfs for %s: NUMA %d", pciAddr, numaNode)
+			} else {
+				continue
+			}
+		}
+
+		if numaNode >= 0 {
+			overrides[pciAddr] = uint32(numaNode) //nolint:gosec // G115: NUMA node IDs are small positive integers
+			log.Log.Infof("DRA NUMA override: device %s (claim=%s request=%s) → NUMA %d",
+				pciAddr, ref.claimName, ref.requestName, numaNode)
+		}
+	}
+
+	return overrides
+}
+
+// numaNodesFromOverrides extracts the unique set of NUMA node IDs from
+// per-device NUMA overrides.
+func numaNodesFromOverrides(overrides map[string]uint32) map[uint32]bool {
+	if len(overrides) == 0 {
+		return nil
+	}
+	nodes := make(map[uint32]bool)
+	for _, n := range overrides {
+		nodes[n] = true
+	}
+	return nodes
+}
+
+func applyDRANUMATopology(domain *api.Domain, vmi *v1.VirtualMachineInstance) {
+	numaOvr := buildDRANUMAOverrides(vmi)
+	draDeviceNUMANodes := numaNodesFromOverrides(numaOvr)
+	hostToGuest := buildHostToGuestNUMAMapping(&domain.Spec, draDeviceNUMANodes)
+	injectGuestSLITDistances(&domain.Spec, hostToGuest)
+
+	if len(numaOvr) > 0 {
+		transformDRAOverridesToGuestCells(numaOvr, hostToGuest)
+		if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec, WithNUMAOverrides(numaOvr)); err != nil {
+			log.Log.Reason(err).Warningf("Failed to process PCIe NUMA-aware topology with DRA overrides, falling back to default placement")
+		}
+	}
+}
+
+// buildDRANUMACells constructs guest NUMA cells from DRA device metadata,
+// distributing vCPUs and memory evenly across the discovered NUMA nodes.
+// It uses buildDRANUMAOverrides to discover NUMA nodes from only the VMI's
+// own DRA claims, avoiding interference from other pods on the node.
+func buildDRANUMACells(
+	domain *api.Domain,
+	vmi *v1.VirtualMachineInstance,
+	c *convertertypes.ConverterContext,
+	deviceNUMANodes map[uint32]bool,
+) error {
+	numaOvr := buildDRANUMAOverrides(vmi)
+
+	numaNodes := make(map[int64]bool)
+	for _, n := range numaOvr {
+		numaNodes[int64(n)] = true
+	}
+	for n := range deviceNUMANodes {
+		numaNodes[int64(n)] = true
+	}
+
+	if len(numaNodes) == 0 {
+		return fmt.Errorf("no NUMA nodes found in DRA metadata")
+	}
+
+	vcpus := hardware.GetNumberOfVCPUs(vmi.Spec.Domain.CPU)
+	if vcpus == 0 {
+		vcpus = 1
+	}
+
+	sortedNUMAs := make([]int64, 0, len(numaNodes))
+	for n := range numaNodes {
+		sortedNUMAs = append(sortedNUMAs, n)
+	}
+	sort.Slice(sortedNUMAs, func(i, j int) bool { return sortedNUMAs[i] < sortedNUMAs[j] })
+
+	numCells := int64(len(sortedNUMAs))
+	cpuPerCell := vcpus / numCells
+	extraCPUs := vcpus % numCells
+
+	var guestMemory int64
+	if vmi.Spec.Domain.Memory != nil && vmi.Spec.Domain.Memory.Guest != nil {
+		guestMemory = vmi.Spec.Domain.Memory.Guest.Value() / 1024 // KiB
+	} else if req, ok := vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory]; ok {
+		guestMemory = req.Value() / 1024
+	}
+	if guestMemory <= 0 {
+		return fmt.Errorf("cannot build DRA NUMA cells: no guest memory configured")
+	}
+	memPerCell := guestMemory / numCells
+
+	domain.Spec.CPU.NUMA = &api.NUMA{}
+	var cpuID int64
+	for i, numaID := range sortedNUMAs {
+		cpus := cpuPerCell
+		if int64(i) < extraCPUs {
+			cpus++
+		}
+
+		var cpuList []string
+		for j := int64(0); j < cpus; j++ {
+			cpuList = append(cpuList, fmt.Sprintf("%d", cpuID))
+			cpuID++
+		}
+
+		cellMem := memPerCell
+		if i == len(sortedNUMAs)-1 {
+			// Give any remainder to the last cell
+			cellMem = guestMemory - memPerCell*int64(len(sortedNUMAs)-1)
+		}
+
+		cellMemU := uint64(cellMem) //nolint:gosec // G115: memory is always positive (guarded above)
+		cell := api.NUMACell{
+			ID:     fmt.Sprintf("%d", i),
+			CPUs:   strings.Join(cpuList, ","),
+			Memory: &cellMemU,
+			Unit:   "KiB",
+		}
+		domain.Spec.CPU.NUMA.Cells = append(domain.Spec.CPU.NUMA.Cells, cell)
+
+		log.Log.Infof("DRA NUMA cell: guest=%d host=%d cpus=%s memory=%d KiB",
+			i, numaID, strings.Join(cpuList, ","), cellMem)
+	}
+
+	return nil
+}
+
+// buildHostToGuestNUMAMapping creates a mapping from host NUMA node IDs to
+// guest NUMA cell IDs based on sorted order correspondence.
+func buildHostToGuestNUMAMapping(spec *api.DomainSpec, deviceNUMANodes map[uint32]bool) map[uint32]uint32 {
+	hostToGuest := make(map[uint32]uint32)
+	if spec.CPU.NUMA == nil {
+		return hostToGuest
+	}
+
+	sortedHostNUMAs := make([]uint32, 0, len(deviceNUMANodes))
+	for n := range deviceNUMANodes {
+		sortedHostNUMAs = append(sortedHostNUMAs, n)
+	}
+	sort.Slice(sortedHostNUMAs, func(i, j int) bool { return sortedHostNUMAs[i] < sortedHostNUMAs[j] })
+
+	for i, hostNUMA := range sortedHostNUMAs {
+		if i < len(spec.CPU.NUMA.Cells) {
+			guestID, err := strconv.ParseUint(spec.CPU.NUMA.Cells[i].ID, 10, 32)
+			if err == nil {
+				hostToGuest[hostNUMA] = uint32(guestID)
+			}
+		}
+	}
+
+	return hostToGuest
+}
+
+// transformDRAOverridesToGuestCells remaps device NUMA overrides from host
+// NUMA node IDs to guest NUMA cell IDs.
+func transformDRAOverridesToGuestCells(overrides map[string]uint32, hostToGuest map[uint32]uint32) {
+	for pciAddr, hostNUMA := range overrides {
+		if guestNUMA, ok := hostToGuest[hostNUMA]; ok {
+			overrides[pciAddr] = guestNUMA
+		} else {
+			log.Log.Warningf("Device %s host NUMA %d has no guest cell mapping, removing from overrides", pciAddr, hostNUMA)
+			delete(overrides, pciAddr)
+		}
+	}
+}
+
+// injectGuestSLITDistances reads host SLIT (System Locality Information Table)
+// distances and injects them as <distances> elements on guest NUMA cells.
+func injectGuestSLITDistances(spec *api.DomainSpec, hostToGuest map[uint32]uint32) {
+	if spec.CPU.NUMA == nil || len(spec.CPU.NUMA.Cells) <= 1 {
+		return
+	}
+
+	hostDistances, err := drautil.ReadHostSLITDistances("")
+	if err != nil {
+		log.Log.Reason(err).Warning("Failed to read host SLIT distances")
+		return
+	}
+	if len(hostDistances) == 0 {
+		return
+	}
+
+	guestToHost := make(map[uint32]uint32)
+	for h, g := range hostToGuest {
+		guestToHost[g] = h
+	}
+
+	for i := range spec.CPU.NUMA.Cells {
+		guestID, err := strconv.ParseUint(spec.CPU.NUMA.Cells[i].ID, 10, 32)
+		if err != nil {
+			continue
+		}
+		hostID, ok := guestToHost[uint32(guestID)]
+		if !ok {
+			continue
+		}
+		hostDist, ok := hostDistances[int(hostID)]
+		if !ok {
+			continue
+		}
+
+		var siblings []api.NUMACellSibling
+		for j := range spec.CPU.NUMA.Cells {
+			targetGuestID, err := strconv.ParseUint(spec.CPU.NUMA.Cells[j].ID, 10, 32)
+			if err != nil {
+				continue
+			}
+			targetHostID, ok := guestToHost[uint32(targetGuestID)]
+			if !ok {
+				continue
+			}
+			if int(targetHostID) < len(hostDist) {
+				siblings = append(siblings, api.NUMACellSibling{
+					ID:    fmt.Sprintf("%d", targetGuestID),
+					Value: uint64(hostDist[targetHostID]), //nolint:gosec // G115: SLIT distances are small positive integers
+				})
+			}
+		}
+
+		if len(siblings) > 0 {
+			spec.CPU.NUMA.Cells[i].Distances = &api.NUMACellDistances{Siblings: siblings}
+		}
+	}
 }
 
 func GetVolumeNameByDisk(disk api.Disk) string {
