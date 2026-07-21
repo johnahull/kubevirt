@@ -24,12 +24,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	resourcev1 "k8s.io/api/resource/v1"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
-	// TODO: Replace with k8s.io types when KEP-5304 is implemented in kubernetes
 	"kubevirt.io/kubevirt/pkg/dra/metadata"
 )
 
@@ -241,4 +242,253 @@ func decodeMetadataFromStream(dec *json.Decoder) (*metadata.DeviceMetadata, erro
 		return nil, fmt.Errorf("no metadata objects found in stream")
 	}
 	return nil, fmt.Errorf("no compatible metadata version found in stream (unknown versions: %s)", strings.Join(unknownVersions, ", "))
+}
+
+// GetNUMANodeForClaim returns the NUMA node for a device in the given claim and request.
+// It reads the resource.kubernetes.io/numaNode attribute from KEP-5304 metadata,
+// trying the standard qualified name first (both IntValue scalar and IntValues list
+// via raw JSON fallback), then falling back to bare "numaNode".
+func GetNUMANodeForClaim(basePath string, resourceClaims []v1.VirtualMachineInstanceResourceClaim, claimRefName, requestName string) (int64, error) {
+	device, err := resolveDevice(basePath, resourceClaims, claimRefName, requestName)
+	if err != nil {
+		return -1, err
+	}
+
+	numaAttr := resourcev1.QualifiedName("resource.kubernetes.io/numaNode")
+	if attr, ok := device.Attributes[numaAttr]; ok && attr.IntValue != nil {
+		return *attr.IntValue, nil
+	}
+	if attr, ok := device.Attributes["numaNode"]; ok && attr.IntValue != nil {
+		return *attr.IntValue, nil
+	}
+
+	// The standard attribute may use IntValues (list type) which older
+	// DeviceAttribute structs don't deserialize. Fall back to raw JSON.
+	mdPath, err := resolveVMIMetadataPath(basePath, resourceClaims, claimRefName, requestName)
+	if err == nil {
+		numaMap := extractNUMANodeLists(mdPath)
+		if nodes, ok := numaMap[device.Name]; ok && len(nodes) > 0 {
+			return nodes[0], nil
+		}
+	}
+
+	return -1, fmt.Errorf("numaNode not found for claim %q request %q", claimRefName, requestName)
+}
+
+// GetPCIeRootForClaim returns the PCIe root complex identifier for a device in the given claim and request.
+func GetPCIeRootForClaim(basePath string, resourceClaims []v1.VirtualMachineInstanceResourceClaim, claimRefName, requestName string) (string, error) {
+	device, err := resolveDevice(basePath, resourceClaims, claimRefName, requestName)
+	if err != nil {
+		return "", err
+	}
+
+	if attr, ok := device.Attributes[metadata.PCIeRootAttribute]; ok {
+		if attr.StringValue != nil && *attr.StringValue != "" {
+			return *attr.StringValue, nil
+		}
+	}
+	return "", fmt.Errorf("pcieRoot not found for claim %q request %q", claimRefName, requestName)
+}
+
+// ResolveDevices returns all devices for a given claim and request, supporting
+// multi-device requests where count > 1.
+func ResolveDevices(basePath string, resourceClaims []v1.VirtualMachineInstanceResourceClaim, claimRefName, requestName string) ([]metadata.Device, error) {
+	md, err := resolveClaimMetadata(basePath, resourceClaims, claimRefName, requestName)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, req := range md.Requests {
+		if req.Name == requestName {
+			if len(req.Devices) == 0 {
+				return nil, fmt.Errorf("request %q has no devices", requestName)
+			}
+			return req.Devices, nil
+		}
+	}
+	return nil, fmt.Errorf(
+		"request %q not found in metadata for claim %q (available requests: %v)",
+		requestName,
+		md.Name,
+		metadataRequestNames(md),
+	)
+}
+
+// resolveVMIMetadataPath returns the path to the metadata file for a claim ref + request pair.
+func resolveVMIMetadataPath(basePath string, resourceClaims []v1.VirtualMachineInstanceResourceClaim, claimRefName, requestName string) (string, error) {
+	for _, rc := range resourceClaims {
+		if rc.Name != claimRefName {
+			continue
+		}
+		var dir string
+		if rc.ResourceClaimName != nil && *rc.ResourceClaimName != "" {
+			dir = filepath.Join(basePath, resourceClaimsSubdir, *rc.ResourceClaimName, requestName)
+		} else {
+			dir = filepath.Join(basePath, resourceClaimTemplatesSubdir, rc.Name, requestName)
+		}
+		matches, err := filepath.Glob(filepath.Join(dir, "*"+metadataFileSuffix))
+		if err != nil || len(matches) == 0 {
+			continue
+		}
+		return matches[0], nil
+	}
+	return "", fmt.Errorf("metadata path not found for claim %q request %q", claimRefName, requestName)
+}
+
+// NUMADeviceInfo contains NUMA topology information for a single allocated device.
+type NUMADeviceInfo struct {
+	RequestName string
+	DeviceName  string
+	Driver      string
+	NUMANode    int64
+	PCIBusID    string
+	PCIeRoot    string
+}
+
+// DiscoverNUMANodesFromAllMetadata scans all KEP-5304 metadata files under basePath
+// and returns NUMA topology information for every allocated device.
+func DiscoverNUMANodesFromAllMetadata(basePath string) ([]NUMADeviceInfo, error) {
+	pattern := filepath.Join(basePath, "*", "*", "*", "*-metadata.json")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("failed to glob metadata files: %w", err)
+	}
+
+	var devices []NUMADeviceInfo
+	pciBusIDAttr := metadata.PCIBusIDAttribute
+
+	for _, file := range matches {
+		md, err := readMetadataFile(file)
+		if err != nil {
+			log.Log.Reason(err).Warningf("Skipping metadata file %s", file)
+			continue
+		}
+
+		numaMap := extractNUMANodeLists(file)
+
+		for _, req := range md.Requests {
+			for _, dev := range req.Devices {
+				info := NUMADeviceInfo{
+					RequestName: req.Name,
+					DeviceName:  dev.Name,
+					Driver:      dev.Driver,
+					NUMANode:    -1,
+				}
+				if nodes, ok := numaMap[dev.Name]; ok && len(nodes) > 0 {
+					info.NUMANode = nodes[0]
+				} else if attr, ok := dev.Attributes["numaNode"]; ok && attr.IntValue != nil {
+					info.NUMANode = *attr.IntValue
+				}
+				if attr, ok := dev.Attributes[pciBusIDAttr]; ok && attr.StringValue != nil {
+					info.PCIBusID = *attr.StringValue
+				}
+				if attr, ok := dev.Attributes[metadata.PCIeRootAttribute]; ok && attr.StringValue != nil {
+					info.PCIeRoot = *attr.StringValue
+				}
+				devices = append(devices, info)
+			}
+		}
+	}
+
+	return devices, nil
+}
+
+// extractNUMANodeLists parses raw JSON from a metadata file to extract numaNode
+// values, including list-type IntValues that older DeviceAttribute structs may
+// not deserialize.
+func extractNUMANodeLists(path string) map[string][]int64 {
+	result := make(map[string][]int64)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return result
+	}
+
+	var raw []struct {
+		Requests []struct {
+			Devices []struct {
+				Name       string                     `json:"name"`
+				Attributes map[string]json.RawMessage `json:"attributes"`
+			} `json:"devices"`
+		} `json:"requests"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		wrapped := []byte("[" + string(data) + "]")
+		if err := json.Unmarshal(wrapped, &raw); err != nil {
+			return result
+		}
+	}
+
+	for _, entry := range raw {
+		for _, req := range entry.Requests {
+			for _, dev := range req.Devices {
+				numaRaw, ok := dev.Attributes["resource.kubernetes.io/numaNode"]
+				if !ok {
+					continue
+				}
+				var attr struct {
+					Ints []int64 `json:"ints"`
+					Int  *int64  `json:"int"`
+				}
+				if err := json.Unmarshal(numaRaw, &attr); err != nil {
+					continue
+				}
+				if len(attr.Ints) > 0 {
+					result[dev.Name] = attr.Ints
+				} else if attr.Int != nil {
+					result[dev.Name] = []int64{*attr.Int}
+				}
+			}
+		}
+	}
+	return result
+}
+
+const defaultNodeBasePath = "/sys/devices/system/node"
+
+// ReadHostSLITDistances reads the SLIT (System Locality Information Table) distance
+// values from sysfs for all NUMA nodes on the host.
+func ReadHostSLITDistances(basePath string) (map[int][]int, error) {
+	if basePath == "" {
+		basePath = defaultNodeBasePath
+	}
+
+	nodes, err := filepath.Glob(filepath.Join(basePath, "node*"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to glob NUMA nodes: %w", err)
+	}
+
+	distances := make(map[int][]int)
+
+	for _, nodePath := range nodes {
+		nodeIDStr := strings.TrimPrefix(filepath.Base(nodePath), "node")
+		nodeID, err := strconv.Atoi(nodeIDStr)
+		if err != nil {
+			continue
+		}
+
+		data, err := os.ReadFile(filepath.Join(nodePath, "distance"))
+		if err != nil {
+			log.Log.V(2).Infof("Failed to read SLIT for node %d: %v", nodeID, err)
+			continue
+		}
+
+		fields := strings.Fields(strings.TrimSpace(string(data)))
+		nodeDistances := make([]int, 0, len(fields))
+		parseErr := false
+		for _, field := range fields {
+			dist, err := strconv.Atoi(field)
+			if err != nil {
+				log.Log.V(2).Infof("Malformed distance value %q for node %d, skipping node", field, nodeID)
+				parseErr = true
+				break
+			}
+			nodeDistances = append(nodeDistances, dist)
+		}
+
+		if !parseErr && len(nodeDistances) > 0 {
+			distances[nodeID] = nodeDistances
+		}
+	}
+
+	return distances, nil
 }

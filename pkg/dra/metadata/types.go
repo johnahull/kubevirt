@@ -58,6 +58,8 @@ const (
 	// MDevUUIDAttribute is the attribute for mediated device UUID (vGPUs)
 	// Note: This is not yet standardized under resource.kubernetes.io
 	MDevUUIDAttribute = resourcev1.QualifiedName("mdevUUID")
+	// PCIeRootAttribute is the standard attribute for PCIe root complex identifier
+	PCIeRootAttribute = resourcev1.QualifiedName("resource.kubernetes.io/pcieRoot")
 )
 
 // APIVersionV1Alpha1 is the JSON apiVersion string for KEP-5304 DRA device
