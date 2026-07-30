@@ -118,6 +118,8 @@ const (
 	// SuccessfulResourceClaimCreateReason is added in an event when a ResourceClaim is
 	// successfully created from a ResourceClaimTemplate.
 	SuccessfulResourceClaimCreateReason = "SuccessfulResourceClaimCreate"
+	FailedResourceClaimDeleteReason     = "FailedResourceClaimDelete"
+	SuccessfulResourceClaimDeleteReason = "SuccessfulResourceClaimDelete"
 	// SourcePVCNotAvailabe is added in an event when the source PVC of a valid
 	// clone Datavolume doesn't exist
 	SourcePVCNotAvailabe = "SourcePVCNotAvailabe"
@@ -637,6 +639,66 @@ func (c *Controller) handleResourceClaims(vm *virtv1.VirtualMachine) (bool, erro
 	return ready, nil
 }
 
+func markResourceClaimCleanupRequired(vm *virtv1.VirtualMachine) {
+	hasPending := false
+	for _, entry := range vm.Spec.ResourceClaimTemplates {
+		if entry.PersistWhenStopped == nil || !*entry.PersistWhenStopped {
+			hasPending = true
+			break
+		}
+	}
+	if !hasPending {
+		return
+	}
+	vmConditions := controller.NewVirtualMachineConditionManager()
+	vmConditions.UpdateCondition(vm, &virtv1.VirtualMachineCondition{
+		Type:               virtv1.VirtualMachineResourceClaimCleanupRequired,
+		LastTransitionTime: metav1.Now(),
+		Status:             k8score.ConditionTrue,
+		Message:            "Non-persistent ResourceClaims will be deleted after VMI stops",
+	})
+}
+
+func (c *Controller) cleanupNonPersistentResourceClaims(vm *virtv1.VirtualMachine) error {
+	vmKey, err := controller.KeyFunc(vm)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range vm.Spec.ResourceClaimTemplates {
+		if entry.PersistWhenStopped != nil && *entry.PersistWhenStopped {
+			continue
+		}
+
+		claimName := watchutil.ResourceClaimNameForVM(vm.Name, entry.Name)
+		key := fmt.Sprintf("%s/%s", vm.Namespace, claimName)
+
+		_, exists, err := c.resourceClaimStore.GetByKey(key)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+
+		c.resourceClaimExpectations.ExpectDeletions(vmKey, []string{key})
+		err = c.clientset.ResourceV1().ResourceClaims(vm.Namespace).Delete(
+			context.Background(), claimName, metav1.DeleteOptions{})
+		if err != nil {
+			c.resourceClaimExpectations.DeletionObserved(vmKey, key)
+			if !apiErrors.IsNotFound(err) {
+				c.recorder.Eventf(vm, k8score.EventTypeWarning, FailedResourceClaimDeleteReason,
+					"Error deleting ResourceClaim %s: %v", claimName, err)
+				return fmt.Errorf("failed to delete ResourceClaim %s: %v", claimName, err)
+			}
+		} else {
+			c.recorder.Eventf(vm, k8score.EventTypeNormal, SuccessfulResourceClaimDeleteReason,
+				"Deleted non-persistent ResourceClaim %s", claimName)
+		}
+	}
+	return nil
+}
+
 func (c *Controller) VMICPUsPatch(vm *virtv1.VirtualMachine, vmi *virtv1.VirtualMachineInstance) error {
 	patchSet := patch.New(
 		patch.WithTest("/spec/domain/cpu/sockets", vmi.Spec.Domain.CPU.Sockets),
@@ -1040,6 +1102,14 @@ func (c *Controller) syncRunStrategy(vm *virtv1.VirtualMachine, vmi *virtv1.Virt
 	}
 	log.Log.Object(vm).V(4).Infof("VirtualMachine RunStrategy: %s", runStrategy)
 
+	if vmi == nil && controller.NewVirtualMachineConditionManager().HasConditionWithStatus(
+		vm, virtv1.VirtualMachineResourceClaimCleanupRequired, k8score.ConditionTrue) {
+		if err := c.cleanupNonPersistentResourceClaims(vm); err != nil {
+			return vm, common.NewSyncError(fmt.Errorf("failed to cleanup ResourceClaims: %v", err), vmiFailedDeleteReason)
+		}
+		controller.NewVirtualMachineConditionManager().RemoveCondition(vm, virtv1.VirtualMachineResourceClaimCleanupRequired)
+	}
+
 	switch runStrategy {
 	case virtv1.RunStrategyAlways:
 		// For this RunStrategy, a VMI should always be running. If a StateChangeRequest
@@ -1115,6 +1185,9 @@ func (c *Controller) syncRunStrategy(vm *virtv1.VirtualMachine, vmi *virtv1.Virt
 			if vmi.DeletionTimestamp == nil && (forceStop || vmiFailed || vmiSucceeded) {
 				// For RerunOnFailure, this controller should only restart the VirtualMachineInstance if it failed.
 				log.Log.Object(vm).Infof("%s with VMI in phase %s and VM runStrategy: %s", stoppingVmMsg, vmi.Status.Phase, runStrategy)
+				if forceStop {
+					markResourceClaimCleanupRequired(vm)
+				}
 				vm, err = c.stopVMI(vm, vmi)
 				if err != nil {
 					log.Log.Object(vm).Errorf(failureDeletingVmiErrFormat, err)
@@ -1157,6 +1230,7 @@ func (c *Controller) syncRunStrategy(vm *virtv1.VirtualMachine, vmi *virtv1.Virt
 
 			if forceStop := hasStopRequestForVMI(vm, vmi); forceStop {
 				log.Log.Object(vm).Infof("%s with VMI in phase %s due to stop request and VM runStrategy: %s", vmi.Status.Phase, stoppingVmMsg, runStrategy)
+				markResourceClaimCleanupRequired(vm)
 				vm, err = c.stopVMI(vm, vmi)
 				if err != nil {
 					log.Log.Object(vm).Errorf(failureDeletingVmiErrFormat, err)
@@ -1197,6 +1271,7 @@ func (c *Controller) syncRunStrategy(vm *virtv1.VirtualMachine, vmi *virtv1.Virt
 			return vm, nil
 		}
 		log.Log.Object(vm).Infof("%s with VMI in phase %s due to runStrategy: %s", stoppingVmMsg, vmi.Status.Phase, runStrategy)
+		markResourceClaimCleanupRequired(vm)
 		vm, err = c.stopVMI(vm, vmi)
 		if err != nil {
 			return vm, common.NewSyncError(fmt.Errorf(failureDeletingVmiErrFormat, err), vmiFailedDeleteReason)
