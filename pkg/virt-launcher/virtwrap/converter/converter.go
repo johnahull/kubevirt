@@ -452,19 +452,24 @@ func applyDRANUMATopology(domain *api.Domain, vmi *v1.VirtualMachineInstance) {
 
 // buildDRANUMACells constructs guest NUMA cells from DRA device metadata,
 // distributing vCPUs and memory evenly across the discovered NUMA nodes.
-// It uses buildDRANUMAOverrides to discover NUMA nodes from only the VMI's
-// own DRA claims, avoiding interference from other pods on the node.
+// It scans all KEP-5304 metadata files mounted into the pod to discover
+// NUMA nodes from every allocated device (CPUs, GPUs, NICs, etc.).
 func buildDRANUMACells(
 	domain *api.Domain,
 	vmi *v1.VirtualMachineInstance,
 	c *convertertypes.ConverterContext,
 	deviceNUMANodes map[uint32]bool,
 ) error {
-	numaOvr := buildDRANUMAOverrides(vmi)
+	allDevices, err := drautil.DiscoverNUMANodesFromAllMetadata(drautil.DefaultMetadataBasePath)
+	if err != nil {
+		log.Log.Reason(err).Warning("Failed to discover NUMA nodes from DRA metadata")
+	}
 
 	numaNodes := make(map[int64]bool)
-	for _, n := range numaOvr {
-		numaNodes[int64(n)] = true
+	for _, dev := range allDevices {
+		if dev.NUMANode >= 0 {
+			numaNodes[dev.NUMANode] = true
+		}
 	}
 	for n := range deviceNUMANodes {
 		numaNodes[int64(n)] = true
