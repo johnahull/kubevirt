@@ -373,10 +373,13 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 	return nil
 }
 
-// buildDRANUMAOverrides extracts NUMA node information from DRA device
-// metadata for all DRA-backed host devices and GPUs, keyed by PCI address.
-func buildDRANUMAOverrides(vmi *v1.VirtualMachineInstance) map[string]uint32 {
-	overrides := make(map[string]uint32)
+// buildDRAPlacementOverrides extracts NUMA node and PCIe root complex
+// information from DRA device metadata for all DRA-backed host devices
+// and GPUs, keyed by PCI address.
+func buildDRAPlacementOverrides(
+	vmi *v1.VirtualMachineInstance,
+) map[string]DevicePlacementOverride {
+	overrides := make(map[string]DevicePlacementOverride)
 
 	type draRef struct {
 		claimName   string
@@ -397,13 +400,15 @@ func buildDRANUMAOverrides(vmi *v1.VirtualMachineInstance) map[string]uint32 {
 
 	for _, ref := range refs {
 		pciAddr, err := drautil.GetPCIAddressForClaim(
-			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, ref.claimName, ref.requestName)
+			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims,
+			ref.claimName, ref.requestName)
 		if err != nil {
 			continue
 		}
 
 		numaNode, err := drautil.GetNUMANodeForClaim(
-			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims, ref.claimName, ref.requestName)
+			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims,
+			ref.claimName, ref.requestName)
 		if err != nil {
 			if sysfsNUMA, sysErr := hardware.GetDeviceNumaNode(pciAddr); sysErr == nil && sysfsNUMA != nil {
 				numaNode = int64(*sysfsNUMA)
@@ -413,39 +418,56 @@ func buildDRANUMAOverrides(vmi *v1.VirtualMachineInstance) map[string]uint32 {
 			}
 		}
 
-		if numaNode >= 0 {
-			overrides[pciAddr] = uint32(numaNode) //nolint:gosec // G115: NUMA node IDs are small positive integers
-			log.Log.Infof("DRA NUMA override: device %s (claim=%s request=%s) → NUMA %d",
-				pciAddr, ref.claimName, ref.requestName, numaNode)
+		if numaNode < 0 {
+			continue
 		}
+
+		ovr := DevicePlacementOverride{
+			NUMANode: uint32(numaNode), //nolint:gosec // G115: NUMA node IDs are small positive integers
+		}
+
+		pcieRoot, err := drautil.GetPCIeRootForClaim(
+			drautil.DefaultMetadataBasePath, vmi.Spec.ResourceClaims,
+			ref.claimName, ref.requestName)
+		if err == nil && pcieRoot != "" {
+			ovr.PCIeRoot = pcieRoot
+		}
+
+		overrides[pciAddr] = ovr
+		log.Log.Infof("DRA placement override: device %s → NUMA %d pcieRoot %q",
+			pciAddr, ovr.NUMANode, ovr.PCIeRoot)
 	}
 
 	return overrides
 }
 
 // numaNodesFromOverrides extracts the unique set of NUMA node IDs from
-// per-device NUMA overrides.
-func numaNodesFromOverrides(overrides map[string]uint32) map[uint32]bool {
+// per-device placement overrides.
+func numaNodesFromOverrides(
+	overrides map[string]DevicePlacementOverride,
+) map[uint32]bool {
 	if len(overrides) == 0 {
 		return nil
 	}
 	nodes := make(map[uint32]bool)
-	for _, n := range overrides {
-		nodes[n] = true
+	for _, ovr := range overrides {
+		nodes[ovr.NUMANode] = true
 	}
 	return nodes
 }
 
 func applyDRANUMATopology(domain *api.Domain, vmi *v1.VirtualMachineInstance) {
-	numaOvr := buildDRANUMAOverrides(vmi)
-	draDeviceNUMANodes := numaNodesFromOverrides(numaOvr)
+	ovr := buildDRAPlacementOverrides(vmi)
+	draDeviceNUMANodes := numaNodesFromOverrides(ovr)
 	hostToGuest := buildHostToGuestNUMAMapping(&domain.Spec, draDeviceNUMANodes)
 	injectGuestSLITDistances(&domain.Spec, hostToGuest)
 
-	if len(numaOvr) > 0 {
-		transformDRAOverridesToGuestCells(numaOvr, hostToGuest)
-		if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec, WithNUMAOverrides(numaOvr)); err != nil {
-			log.Log.Reason(err).Warningf("Failed to process PCIe NUMA-aware topology with DRA overrides, falling back to default placement")
+	if len(ovr) > 0 {
+		transformDRAOverridesToGuestCells(ovr, hostToGuest)
+		if err := PlacePCIDevicesWithNUMAAlignment(&domain.Spec,
+			WithDevicePlacementOverrides(ovr)); err != nil {
+			log.Log.Reason(err).Warningf(
+				"Failed to process PCIe NUMA-aware topology with DRA overrides")
 		}
 	}
 }
@@ -569,12 +591,18 @@ func buildHostToGuestNUMAMapping(spec *api.DomainSpec, deviceNUMANodes map[uint3
 
 // transformDRAOverridesToGuestCells remaps device NUMA overrides from host
 // NUMA node IDs to guest NUMA cell IDs.
-func transformDRAOverridesToGuestCells(overrides map[string]uint32, hostToGuest map[uint32]uint32) {
-	for pciAddr, hostNUMA := range overrides {
-		if guestNUMA, ok := hostToGuest[hostNUMA]; ok {
-			overrides[pciAddr] = guestNUMA
+func transformDRAOverridesToGuestCells(
+	overrides map[string]DevicePlacementOverride,
+	hostToGuest map[uint32]uint32,
+) {
+	for pciAddr, ovr := range overrides {
+		if guestNUMA, ok := hostToGuest[ovr.NUMANode]; ok {
+			ovr.NUMANode = guestNUMA
+			overrides[pciAddr] = ovr
 		} else {
-			log.Log.Warningf("Device %s host NUMA %d has no guest cell mapping, removing from overrides", pciAddr, hostNUMA)
+			log.Log.Warningf(
+				"Device %s host NUMA %d has no guest cell mapping, removing",
+				pciAddr, ovr.NUMANode)
 			delete(overrides, pciAddr)
 		}
 	}
