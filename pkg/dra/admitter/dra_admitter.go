@@ -44,6 +44,7 @@ type DRAConfigChecker interface {
 	GPUsWithDRAGateEnabled() bool
 	HostDevicesWithDRAEnabled() bool
 	NetworkDevicesWithDRAGateEnabled() bool
+	ManagedDRAClaimsEnabled() bool
 }
 
 func NewValidator(field *k8sfield.Path, vmiSpec *v1.VirtualMachineInstanceSpec, configChecker DRAConfigChecker) *Validator {
@@ -69,7 +70,7 @@ func (v Validator) Validate() []metav1.StatusCause {
 func validateCreationDRA(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, checker DRAConfigChecker) []metav1.StatusCause {
 	var causes []metav1.StatusCause
 
-	causes = append(causes, validateResourceClaims(field.Child("resourceClaims"), spec.ResourceClaims)...)
+	causes = append(causes, validateResourceClaims(field.Child("resourceClaims"), spec.ResourceClaims, checker)...)
 
 	gpuCauses, gpuClaimNames, gpuClaimRequestPairs := validateDRAGPUs(field, spec.Domain.Devices.GPUs, checker)
 	causes = append(causes, gpuCauses...)
@@ -97,6 +98,19 @@ func validateCreationDRA(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSp
 
 	allClaimNames := gpuClaimNames.Union(hdClaimNames)
 
+	// Networks are keyed as "claimName/requestName" by the tuple extractor.
+	referencedClaimNames := allClaimNames.Clone()
+	for tuple := range netClaimRequestPairs {
+		if claimName, _, found := strings.Cut(tuple, "/"); found {
+			referencedClaimNames.Insert(claimName)
+		}
+	}
+	causes = append(causes, validateManagedClaimCoverage(
+		field.Child("resourceClaims"),
+		spec.ResourceClaims,
+		referencedClaimNames,
+	)...)
+
 	claimNamesFromRC := sets.New[string]()
 	for _, rc := range spec.ResourceClaims {
 		claimNamesFromRC.Insert(rc.Name)
@@ -113,7 +127,11 @@ func validateCreationDRA(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSp
 	return causes
 }
 
-func validateResourceClaims(field *k8sfield.Path, resourceClaims []v1.VirtualMachineInstanceResourceClaim) []metav1.StatusCause {
+func validateResourceClaims(
+	field *k8sfield.Path,
+	resourceClaims []v1.VirtualMachineInstanceResourceClaim,
+	checker DRAConfigChecker,
+) []metav1.StatusCause {
 	var causes []metav1.StatusCause
 	claimNames := sets.New[string]()
 
@@ -142,17 +160,27 @@ func validateResourceClaims(field *k8sfield.Path, resourceClaims []v1.VirtualMac
 			claimNames.Insert(claim.Name)
 		}
 
-		if claim.ResourceClaimName != nil && claim.ResourceClaimTemplateName != nil {
+		sources := 0
+		for _, set := range []bool{
+			claim.ResourceClaimName != nil,
+			claim.ResourceClaimTemplateName != nil,
+			claim.ManagedClaimProvisionerName != nil,
+		} {
+			if set {
+				sources++
+			}
+		}
+		if sources > 1 {
 			causes = append(causes, metav1.StatusCause{
 				Type:    metav1.CauseTypeFieldValueInvalid,
-				Message: "at most one of resourceClaimName or resourceClaimTemplateName may be specified",
+				Message: "at most one of resourceClaimName, resourceClaimTemplateName, or managedClaimProvisionerName may be specified",
 				Field:   claimField.String(),
 			})
 		}
-		if claim.ResourceClaimName == nil && claim.ResourceClaimTemplateName == nil {
+		if sources == 0 {
 			causes = append(causes, metav1.StatusCause{
 				Type:    metav1.CauseTypeFieldValueInvalid,
-				Message: "must specify one of: resourceClaimName, resourceClaimTemplateName",
+				Message: "must specify one of: resourceClaimName, resourceClaimTemplateName, managedClaimProvisionerName",
 				Field:   claimField.String(),
 			})
 		}
@@ -174,6 +202,60 @@ func validateResourceClaims(field *k8sfield.Path, resourceClaims []v1.VirtualMac
 				})
 			}
 		}
+		if claim.ManagedClaimProvisionerName != nil {
+			if !checker.ManagedDRAClaimsEnabled() {
+				causes = append(causes, metav1.StatusCause{
+					Type: metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf(
+						"vmi.spec.resourceClaims[%d] uses managedClaimProvisionerName but the ManagedDRAClaims feature gate is not enabled",
+						i,
+					),
+					Field: claimField.Child("managedClaimProvisionerName").String(),
+				})
+			}
+			for _, detail := range apivalidation.NameIsDNSSubdomain(*claim.ManagedClaimProvisionerName, false) {
+				causes = append(causes, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: detail,
+					Field:   claimField.Child("managedClaimProvisionerName").String(),
+				})
+			}
+		}
+	}
+
+	return causes
+}
+
+// validateManagedClaimCoverage enforces that every managed claim entry is
+// referenced by at least one device.
+//
+// Unlike a user-authored ResourceClaim, a managed claim derives its device
+// requests entirely from the declarations pointing at it, so an unreferenced
+// entry would generate an empty claim that can never be allocated. Direct and
+// template claims are exempt: the user wrote them, and they may legitimately
+// carry requests this VMI does not consume.
+func validateManagedClaimCoverage(
+	field *k8sfield.Path,
+	resourceClaims []v1.VirtualMachineInstanceResourceClaim,
+	referencedClaimNames sets.Set[string],
+) []metav1.StatusCause {
+	var causes []metav1.StatusCause
+
+	for i, claim := range resourceClaims {
+		if claim.ManagedClaimProvisionerName == nil {
+			continue
+		}
+		if referencedClaimNames.Has(claim.Name) {
+			continue
+		}
+		causes = append(causes, metav1.StatusCause{
+			Type: metav1.CauseTypeFieldValueInvalid,
+			Message: fmt.Sprintf(
+				"no device references managed resource claim %q; a managed claim must have at least one device",
+				claim.Name,
+			),
+			Field: field.Index(i).String(),
+		})
 	}
 
 	return causes
