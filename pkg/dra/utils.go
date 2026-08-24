@@ -55,12 +55,13 @@ const (
 // GetPCIAddressForClaim returns the PCI address for a device in the given claim and request.
 // It lazily reads the KEP-5304 metadata file at lookup time.
 func GetPCIAddressForClaim(
+	vmiName string,
 	basePath string,
 	resourceClaims []v1.VirtualMachineInstanceResourceClaim,
 	claimRefName,
 	requestName string,
 ) (string, error) {
-	device, err := resolveDevice(basePath, resourceClaims, claimRefName, requestName)
+	device, err := resolveDevice(vmiName, basePath, resourceClaims, claimRefName, requestName)
 	if err != nil {
 		return "", err
 	}
@@ -76,12 +77,13 @@ func GetPCIAddressForClaim(
 // GetMDevUUIDForClaim returns the mdev UUID for a device in the given claim and request.
 // It lazily reads the KEP-5304 metadata file at lookup time.
 func GetMDevUUIDForClaim(
+	vmiName string,
 	basePath string,
 	resourceClaims []v1.VirtualMachineInstanceResourceClaim,
 	claimRefName,
 	requestName string,
 ) (string, error) {
-	device, err := resolveDevice(basePath, resourceClaims, claimRefName, requestName)
+	device, err := resolveDevice(vmiName, basePath, resourceClaims, claimRefName, requestName)
 	if err != nil {
 		return "", err
 	}
@@ -97,12 +99,13 @@ func GetMDevUUIDForClaim(
 // resolveDevice finds and reads the metadata file for a specific claim ref and
 // request, returning the single device from that request.
 func resolveDevice(
+	vmiName string,
 	basePath string,
 	resourceClaims []v1.VirtualMachineInstanceResourceClaim,
 	claimRefName,
 	requestName string,
 ) (*metadata.Device, error) {
-	md, err := resolveClaimMetadata(basePath, resourceClaims, claimRefName, requestName)
+	md, err := resolveClaimMetadata(vmiName, basePath, resourceClaims, claimRefName, requestName)
 	if err != nil {
 		return nil, err
 	}
@@ -132,8 +135,16 @@ func resolveDevice(
 
 // resolveClaimMetadata reads the metadata file for a claim ref + request pair.
 // Direct claims:   {base}/resourceclaims/{claimName}/{requestName}/{driverName}-metadata.json
+// Managed claims:  {base}/resourceclaims/{derivedName}/{requestName}/{driverName}-metadata.json
 // Template claims: {base}/resourceclaimtemplates/{podClaimName}/{requestName}/{driverName}-metadata.json
+//
+// A managed claim carries no ResourceClaimName in the VMI spec, but
+// virt-controller renders its derived name into the launcher pod as a direct
+// reference, so kubelet writes its metadata under the direct-claim directory.
+// Routing must follow what the pod references, not whether the spec field is
+// set.
 func resolveClaimMetadata(
+	vmiName string,
 	basePath string,
 	resourceClaims []v1.VirtualMachineInstanceResourceClaim,
 	claimRefName,
@@ -142,6 +153,13 @@ func resolveClaimMetadata(
 	for _, rc := range resourceClaims {
 		if rc.Name != claimRefName {
 			continue
+		}
+		if IsManagedClaim(rc) {
+			return readMetadataFromDir(
+				filepath.Join(basePath, resourceClaimsSubdir),
+				ManagedClaimName(vmiName, rc.Name),
+				requestName,
+			)
 		}
 		if rc.ResourceClaimName != nil && *rc.ResourceClaimName != "" {
 			return readMetadataFromDir(filepath.Join(basePath, resourceClaimsSubdir), *rc.ResourceClaimName, requestName)
