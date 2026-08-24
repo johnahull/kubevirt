@@ -31,8 +31,10 @@ import (
 var SchemeGroupVersion = schema.GroupVersion{Group: core.GroupName, Version: "v1alpha1"}
 
 const (
-	ManagedClaimProvisionerKind     = "ManagedClaimProvisioner"
-	ManagedClaimProvisionerListKind = "ManagedClaimProvisionerList"
+	ManagedClaimProvisionerKind      = "ManagedClaimProvisioner"
+	ManagedClaimProvisionerListKind  = "ManagedClaimProvisionerList"
+	ResourceManagedClaimProvisioners = "managedclaimprovisioners"
+	ResourceManagedClaimProvisioner  = "managedclaimprovisioner"
 )
 
 var (
