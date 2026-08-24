@@ -23,6 +23,7 @@ swagger-doc -in ${KUBEVIRT_DIR}/staging/src/kubevirt.io/api/clone/v1alpha1/types
 swagger-doc -in ${KUBEVIRT_DIR}/staging/src/kubevirt.io/api/clone/v1beta1/types.go
 swagger-doc -in ${KUBEVIRT_DIR}/staging/src/kubevirt.io/api/backup/v1alpha1/types.go
 swagger-doc -in ${KUBEVIRT_DIR}/staging/src/kubevirt.io/api/plugin/v1alpha1/types.go
+swagger-doc -in ${KUBEVIRT_DIR}/staging/src/kubevirt.io/api/core/v1alpha1/types.go
 
 deepcopy-gen \
     --bounding-dirs kubevirt.io/api \
@@ -40,7 +41,8 @@ deepcopy-gen \
     kubevirt.io/api/clone/v1beta1 \
     kubevirt.io/api/backup/v1alpha1 \
     kubevirt.io/api/plugin/v1alpha1 \
-    kubevirt.io/api/core/v1
+    kubevirt.io/api/core/v1 \
+    kubevirt.io/api/core/v1alpha1
 
 defaulter-gen \
     --output-file zz_generated.defaults.go \
@@ -59,6 +61,7 @@ openapi-gen \
     k8s.io/apimachinery/pkg/runtime \
     k8s.io/apimachinery/pkg/util/intstr \
     kubevirt.io/api/core/v1 \
+    kubevirt.io/api/core/v1alpha1 \
     kubevirt.io/api/clone/v1alpha1 \
     kubevirt.io/api/clone/v1beta1 \
     kubevirt.io/api/export/v1beta1 \
@@ -89,7 +92,7 @@ fi
 
 client-gen --clientset-name kubevirt \
     --input-base kubevirt.io/api \
-    --input core/v1,export/v1beta1,export/v1,snapshot/v1alpha1,snapshot/v1beta1,instancetype/v1beta1,pool/v1alpha1,pool/v1beta1,migrations/v1alpha1,clone/v1alpha1,clone/v1beta1,backup/v1alpha1,plugin/v1alpha1 \
+    --input core/v1,core/v1alpha1,export/v1beta1,export/v1,snapshot/v1alpha1,snapshot/v1beta1,instancetype/v1beta1,pool/v1alpha1,pool/v1beta1,migrations/v1alpha1,clone/v1alpha1,clone/v1beta1,backup/v1alpha1,plugin/v1alpha1 \
     --output-dir ${KUBEVIRT_DIR}/staging/src/kubevirt.io/client-go \
     --output-pkg ${CLIENT_GEN_BASE} \
     --go-header-file ${KUBEVIRT_DIR}/hack/boilerplate/boilerplate.go.txt
@@ -164,6 +167,9 @@ deepcopy-gen \
 
     #include plugin
     GOFLAGS= controller-gen crd paths=../api/plugin/v1alpha1/
+
+    #include core v1alpha1 (ManagedClaimProvisioner)
+    GOFLAGS= controller-gen crd paths=../api/core/v1alpha1/
 
     #remove some weird stuff from controller-gen
     cd config/crd

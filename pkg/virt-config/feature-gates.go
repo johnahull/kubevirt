@@ -171,6 +171,10 @@ func (config *ClusterConfig) NetworkDevicesWithDRAGateEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.NetworkDevicesWithDRAGate)
 }
 
+func (config *ClusterConfig) ManagedDRAClaimsEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.ManagedDRAClaimsGate)
+}
+
 func (config *ClusterConfig) AnyDeviceDRAGateEnabled() bool {
 	return config.GPUsWithDRAGateEnabled() ||
 		config.HostDevicesWithDRAEnabled() ||
