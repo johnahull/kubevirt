@@ -32,7 +32,7 @@ import (
 var _ = Describe("ResourceClaims", func() {
 	DescribeTable("should convert VMI resourceClaims to Pod resourceClaims",
 		func(resourceClaims []v1.VirtualMachineInstanceResourceClaim, expected []k8sv1.PodResourceClaim) {
-			Expect(ToPodResourceClaims(resourceClaims)).To(Equal(expected))
+			Expect(ToPodResourceClaims("test-vmi", resourceClaims)).To(Equal(expected))
 		},
 		Entry("nil resourceClaims",
 			nil,
@@ -41,6 +41,52 @@ var _ = Describe("ResourceClaims", func() {
 		Entry("empty resourceClaims",
 			[]v1.VirtualMachineInstanceResourceClaim{},
 			nil,
+		),
+		Entry("managed claim renders the deterministic claim name",
+			// The provisioner controller creates the ResourceClaim out of band
+			// under this same derived name, so the pod references it directly.
+			[]v1.VirtualMachineInstanceResourceClaim{
+				{
+					Name:                        "aligned-devices",
+					ManagedClaimProvisionerName: ptr.To("pcie-aligned"),
+				},
+			},
+			[]k8sv1.PodResourceClaim{
+				{
+					Name:              "aligned-devices",
+					ResourceClaimName: ptr.To("test-vmi-aligned-devices"),
+				},
+			},
+		),
+		Entry("managed, direct, and template claims side by side",
+			[]v1.VirtualMachineInstanceResourceClaim{
+				{
+					Name:                        "managed-claim",
+					ManagedClaimProvisionerName: ptr.To("pcie-aligned"),
+				},
+				{
+					Name:              "direct-claim",
+					ResourceClaimName: ptr.To("resource-claim"),
+				},
+				{
+					Name:                      "template-claim",
+					ResourceClaimTemplateName: ptr.To("resource-claim-template"),
+				},
+			},
+			[]k8sv1.PodResourceClaim{
+				{
+					Name:              "managed-claim",
+					ResourceClaimName: ptr.To("test-vmi-managed-claim"),
+				},
+				{
+					Name:              "direct-claim",
+					ResourceClaimName: ptr.To("resource-claim"),
+				},
+				{
+					Name:                      "template-claim",
+					ResourceClaimTemplateName: ptr.To("resource-claim-template"),
+				},
+			},
 		),
 		Entry("direct and template resourceClaims",
 			[]v1.VirtualMachineInstanceResourceClaim{
