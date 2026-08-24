@@ -525,4 +525,87 @@ var _ = Describe("Validating VMIUpdate Admitter", func() {
 		Expect(resp.Allowed).To(BeFalse())
 	})
 
+	Context("managed DRA claims", func() {
+		// Ordinary users already cannot change the VMI spec at all. This
+		// guards the KubeVirt service account path, which reaches
+		// admitHotplug via subresources and would otherwise let the
+		// provisioner reference change out from under a running VMI whose
+		// ResourceClaim has already been generated and allocated.
+		managed := func(name, provisioner string) v1.VirtualMachineInstanceResourceClaim {
+			return v1.VirtualMachineInstanceResourceClaim{
+				Name:                        name,
+				ManagedClaimProvisionerName: &provisioner,
+			}
+		}
+
+		direct := func(name, claimName string) v1.VirtualMachineInstanceResourceClaim {
+			return v1.VirtualMachineInstanceResourceClaim{
+				Name:              name,
+				ResourceClaimName: &claimName,
+			}
+		}
+
+		DescribeTable("should allow unchanged claims",
+			func(claims ...v1.VirtualMachineInstanceResourceClaim) {
+				Expect(admitManagedClaimsImmutable(claims, claims)).To(BeNil())
+			},
+			Entry("no claims at all"),
+			Entry("an unchanged managed claim", managed("aligned", "pcie-aligned")),
+			Entry("a claim that was never managed", direct("direct", "some-claim")),
+			Entry("managed alongside direct",
+				managed("aligned", "pcie-aligned"), direct("direct", "some-claim")),
+		)
+
+		DescribeTable("should reject a changed managedClaimProvisionerName",
+			func(oldClaims, newClaims []v1.VirtualMachineInstanceResourceClaim) {
+				resp := admitManagedClaimsImmutable(oldClaims, newClaims)
+
+				Expect(resp).ToNot(BeNil())
+				Expect(resp.Allowed).To(BeFalse())
+				Expect(resp.Result.Message).To(ContainSubstring("managedClaimProvisionerName is immutable"))
+			},
+			Entry("provisioner swapped",
+				[]v1.VirtualMachineInstanceResourceClaim{managed("aligned", "pcie-aligned")},
+				[]v1.VirtualMachineInstanceResourceClaim{managed("aligned", "numa-aligned")},
+			),
+			Entry("managed claim added",
+				nil,
+				[]v1.VirtualMachineInstanceResourceClaim{managed("aligned", "pcie-aligned")},
+			),
+			Entry("managed claim removed",
+				[]v1.VirtualMachineInstanceResourceClaim{managed("aligned", "pcie-aligned")},
+				nil,
+			),
+			Entry("managed claim converted to a direct claim",
+				[]v1.VirtualMachineInstanceResourceClaim{managed("aligned", "pcie-aligned")},
+				[]v1.VirtualMachineInstanceResourceClaim{direct("aligned", "some-claim")},
+			),
+			Entry("managed claim renamed",
+				[]v1.VirtualMachineInstanceResourceClaim{managed("aligned", "pcie-aligned")},
+				[]v1.VirtualMachineInstanceResourceClaim{managed("realigned", "pcie-aligned")},
+			),
+		)
+
+		It("should be reached through admitHotplug", func() {
+			// admitHotplugCPU dereferences Spec.Domain.CPU unconditionally, so
+			// give both VMIs a topology; in production the mutating webhook
+			// has already defaulted it.
+			vmiWithClaims := func(claims ...v1.VirtualMachineInstanceResourceClaim) *v1.VirtualMachineInstance {
+				vmi := api.NewMinimalVMI("testvmi")
+				vmi.Spec.Domain.CPU = &v1.CPU{Sockets: 1, Cores: 1, Threads: 1}
+				vmi.Spec.ResourceClaims = claims
+				return vmi
+			}
+
+			resp := admitHotplug(
+				vmiWithClaims(managed("aligned", "pcie-aligned")),
+				vmiWithClaims(managed("aligned", "numa-aligned")),
+				config,
+			)
+
+			Expect(resp).ToNot(BeNil())
+			Expect(resp.Allowed).To(BeFalse())
+			Expect(resp.Result.Message).To(ContainSubstring("managedClaimProvisionerName is immutable"))
+		})
+	})
 })
