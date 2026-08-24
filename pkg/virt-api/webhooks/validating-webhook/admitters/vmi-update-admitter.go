@@ -26,6 +26,7 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
 
 	v1 "kubevirt.io/api/core/v1"
 
@@ -176,6 +177,10 @@ func admitHotplug(
 		return response
 	}
 
+	if response := admitManagedClaimsImmutable(oldVMI.Spec.ResourceClaims, newVMI.Spec.ResourceClaims); response != nil {
+		return response
+	}
+
 	if response := storageadmitters.AdmitUtilityVolumes(&newVMI.Spec, &oldVMI.Spec, oldVMI.Status.VolumeStatus, clusterConfig); response != nil {
 		return response
 	}
@@ -189,6 +194,42 @@ func admitHotplug(
 		newVMI,
 		clusterConfig)
 
+}
+
+// admitManagedClaimsImmutable rejects any change to managedClaimProvisionerName.
+//
+// A managed claim's ResourceClaim is generated once from the VMI's device
+// declarations and then allocated by the scheduler. Repointing the entry at a
+// different provisioner, or adding or removing one, would leave the running
+// VMI bound to devices that no longer match its spec, so the field is fixed
+// for the lifetime of the VMI.
+//
+// Ordinary users cannot reach this path at all: any VMI spec change is already
+// rejected outright. This guards the KubeVirt service account, which reaches
+// admitHotplug through subresources.
+func admitManagedClaimsImmutable(oldClaims, newClaims []v1.VirtualMachineInstanceResourceClaim) *admissionv1.AdmissionResponse {
+	provisionersByClaimName := func(claims []v1.VirtualMachineInstanceResourceClaim) map[string]string {
+		provisioners := map[string]string{}
+		for _, claim := range claims {
+			if claim.ManagedClaimProvisionerName != nil {
+				provisioners[claim.Name] = *claim.ManagedClaimProvisionerName
+			}
+		}
+		return provisioners
+	}
+
+	oldProvisioners := provisionersByClaimName(oldClaims)
+	newProvisioners := provisionersByClaimName(newClaims)
+
+	if equality.Semantic.DeepEqual(oldProvisioners, newProvisioners) {
+		return nil
+	}
+
+	return webhookutils.ToAdmissionResponse([]metav1.StatusCause{{
+		Type:    metav1.CauseTypeFieldValueInvalid,
+		Message: "managedClaimProvisionerName is immutable and cannot be changed after the VMI is created",
+		Field:   k8sfield.NewPath("spec", "resourceClaims").String(),
+	}})
 }
 
 func admitHotplugCPU(oldCPUTopology, newCPUTopology *v1.CPU) *admissionv1.AdmissionResponse {
