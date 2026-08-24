@@ -170,6 +170,7 @@ func CreateDRAHostDevices(vmi *v1.VirtualMachineInstance, metadataBasePath strin
 		requestName := network.NetworkSource.ResourceClaim.RequestName
 
 		pciAddress, err := drautil.GetPCIAddressForClaim(
+			vmi.Name,
 			metadataBasePath,
 			vmi.Spec.ResourceClaims,
 			claimName,
