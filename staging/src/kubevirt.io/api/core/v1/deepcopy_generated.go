@@ -6673,6 +6673,11 @@ func (in *VirtualMachineInstanceResourceClaim) DeepCopyInto(out *VirtualMachineI
 		*out = new(string)
 		**out = **in
 	}
+	if in.ManagedClaimProvisionerName != nil {
+		in, out := &in.ManagedClaimProvisionerName, &out.ManagedClaimProvisionerName
+		*out = new(string)
+		**out = **in
+	}
 	return
 }
 

@@ -210,8 +210,8 @@ type VirtualMachineInstanceResourceClaim struct {
 	// ResourceClaimName is the name of a ResourceClaim object in the same
 	// namespace as this VMI.
 	//
-	// Exactly one of ResourceClaimName and ResourceClaimTemplateName must
-	// be set.
+	// Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+	// ManagedClaimProvisionerName must be set.
 	ResourceClaimName *string `json:"resourceClaimName,omitempty"`
 	// ResourceClaimTemplateName is the name of a ResourceClaimTemplate
 	// object in the same namespace as this VMI.
@@ -223,9 +223,25 @@ type VirtualMachineInstanceResourceClaim struct {
 	// generated ResourceClaim name is unique and is recorded in
 	// pod.status.resourceClaimStatuses.
 	//
-	// Exactly one of ResourceClaimName and ResourceClaimTemplateName must
-	// be set.
+	// Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+	// ManagedClaimProvisionerName must be set.
 	ResourceClaimTemplateName *string `json:"resourceClaimTemplateName,omitempty"`
+	// ManagedClaimProvisionerName references a cluster-scoped
+	// ManagedClaimProvisioner object that controls how the ResourceClaim is
+	// generated.
+	//
+	// The managed-claim framework passes the VMI device declarations that
+	// reference this entry to the matching provisioner controller, which
+	// generates a ResourceClaim named <vmi-name>-<claim-name>. The claim is
+	// owned by the VMI and garbage collected with it.
+	//
+	// Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+	// ManagedClaimProvisionerName must be set.
+	//
+	// This field requires the ManagedDRAClaims feature gate.
+	// This feature is in alpha.
+	// +optional
+	ManagedClaimProvisionerName *string `json:"managedClaimProvisionerName,omitempty"`
 }
 
 func (vmiSpec *VirtualMachineInstanceSpec) UnmarshalJSON(data []byte) error {
@@ -722,6 +738,12 @@ const (
 
 	// Summarizes that all the DataVolumes attached to the VMI are Ready or not
 	VirtualMachineInstanceDataVolumesReady VirtualMachineInstanceConditionType = "DataVolumesReady"
+
+	// Indicates that a provisioner controller failed to generate a managed
+	// ResourceClaim for one of the VMI's spec.resourceClaims[] entries. This
+	// condition is diagnostic only; it is not a pod-creation readiness
+	// handshake. It is cleared once the claim reconciles successfully.
+	VirtualMachineInstanceManagedClaimProvisioningFailed VirtualMachineInstanceConditionType = "ManagedClaimProvisioningFailed"
 
 	// Indicates whether the VMI is live migratable
 	VirtualMachineInstanceIsStorageLiveMigratable VirtualMachineInstanceConditionType = "StorageLiveMigratable"
