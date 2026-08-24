@@ -40,8 +40,9 @@ const (
 )
 
 type fakeConfigChecker struct {
-	gpuDRAEnabled        bool
-	hostDeviceDRAEnabled bool
+	gpuDRAEnabled          bool
+	hostDeviceDRAEnabled   bool
+	managedDRAClaimsEnable bool
 }
 
 func resourceClaim(name string) v1.VirtualMachineInstanceResourceClaim {
@@ -134,6 +135,10 @@ func (f *fakeConfigChecker) HostDevicesWithDRAEnabled() bool {
 
 func (f *fakeConfigChecker) NetworkDevicesWithDRAGateEnabled() bool {
 	return false
+}
+
+func (f *fakeConfigChecker) ManagedDRAClaimsEnabled() bool {
+	return f.managedDRAClaimsEnable
 }
 
 var _ = Describe("DRA Admitter", func() {
@@ -260,7 +265,7 @@ var _ = Describe("DRA Admitter", func() {
 			causes := validateCreationDRA(field, spec, checker)
 			Expect(causes).To(ContainElement(metav1.StatusCause{
 				Type:    metav1.CauseTypeFieldValueInvalid,
-				Message: "at most one of resourceClaimName or resourceClaimTemplateName may be specified",
+				Message: "at most one of resourceClaimName, resourceClaimTemplateName, or managedClaimProvisionerName may be specified",
 				Field:   "spec.resourceClaims[0]",
 			}))
 		})
@@ -275,9 +280,132 @@ var _ = Describe("DRA Admitter", func() {
 			causes := validateCreationDRA(field, spec, checker)
 			Expect(causes).To(ContainElement(metav1.StatusCause{
 				Type:    metav1.CauseTypeFieldValueInvalid,
-				Message: "must specify one of: resourceClaimName, resourceClaimTemplateName",
+				Message: "must specify one of: resourceClaimName, resourceClaimTemplateName, managedClaimProvisionerName",
 				Field:   "spec.resourceClaims[0]",
 			}))
+		})
+	})
+
+	Context("managed claim validation", func() {
+		managedClaim := func(name, provisioner string) v1.VirtualMachineInstanceResourceClaim {
+			return v1.VirtualMachineInstanceResourceClaim{
+				Name:                        name,
+				ManagedClaimProvisionerName: pointer.P(provisioner),
+			}
+		}
+
+		BeforeEach(func() {
+			checker.managedDRAClaimsEnable = true
+			checker.gpuDRAEnabled = true
+		})
+
+		It("should accept a managed claim referenced by a device", func() {
+			spec := gpuSpec(
+				[]v1.VirtualMachineInstanceResourceClaim{managedClaim(claim1, "pcie-aligned")},
+				gpuWithClaimRequest("gpu0", claim1, req1),
+			)
+
+			Expect(validateCreationDRA(field, spec, checker)).To(BeEmpty())
+		})
+
+		DescribeTable("should reject combining managedClaimProvisionerName with another claim source",
+			func(claim v1.VirtualMachineInstanceResourceClaim) {
+				spec := gpuSpec(
+					[]v1.VirtualMachineInstanceResourceClaim{claim},
+					gpuWithClaimRequest("gpu0", claim1, req1),
+				)
+
+				Expect(validateCreationDRA(field, spec, checker)).To(ContainElement(metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: "at most one of resourceClaimName, resourceClaimTemplateName, or managedClaimProvisionerName may be specified",
+					Field:   "spec.resourceClaims[0]",
+				}))
+			},
+			Entry("with resourceClaimName", v1.VirtualMachineInstanceResourceClaim{
+				Name:                        claim1,
+				ResourceClaimName:           pointer.P(claim1),
+				ManagedClaimProvisionerName: pointer.P("pcie-aligned"),
+			}),
+			Entry("with resourceClaimTemplateName", v1.VirtualMachineInstanceResourceClaim{
+				Name:                        claim1,
+				ResourceClaimTemplateName:   pointer.P(template1),
+				ManagedClaimProvisionerName: pointer.P("pcie-aligned"),
+			}),
+			Entry("with all three", v1.VirtualMachineInstanceResourceClaim{
+				Name:                        claim1,
+				ResourceClaimName:           pointer.P(claim1),
+				ResourceClaimTemplateName:   pointer.P(template1),
+				ManagedClaimProvisionerName: pointer.P("pcie-aligned"),
+			}),
+		)
+
+		It("should reject a managed claim when the feature gate is disabled", func() {
+			checker.managedDRAClaimsEnable = false
+			spec := gpuSpec(
+				[]v1.VirtualMachineInstanceResourceClaim{managedClaim(claim1, "pcie-aligned")},
+				gpuWithClaimRequest("gpu0", claim1, req1),
+			)
+
+			Expect(validateCreationDRA(field, spec, checker)).To(ContainElement(metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: "vmi.spec.resourceClaims[0] uses managedClaimProvisionerName but the ManagedDRAClaims feature gate is not enabled",
+				Field:   "spec.resourceClaims[0].managedClaimProvisionerName",
+			}))
+		})
+
+		It("should reject an invalid managedClaimProvisionerName", func() {
+			spec := gpuSpec(
+				[]v1.VirtualMachineInstanceResourceClaim{managedClaim(claim1, "../provisioner")},
+				gpuWithClaimRequest("gpu0", claim1, req1),
+			)
+
+			Expect(validateCreationDRA(field, spec, checker)).To(
+				ContainElement(HaveField("Field", "spec.resourceClaims[0].managedClaimProvisionerName")))
+		})
+
+		It("should reject a managed claim no device references", func() {
+			// A managed claim generates its requests from the devices pointing
+			// at it, so an unreferenced entry would produce an empty
+			// ResourceClaim that can never be allocated.
+			spec := gpuSpec(
+				[]v1.VirtualMachineInstanceResourceClaim{
+					managedClaim(claim1, "pcie-aligned"),
+					managedClaim(claim2, "pcie-aligned"),
+				},
+				gpuWithClaimRequest("gpu0", claim1, req1),
+			)
+
+			Expect(validateCreationDRA(field, spec, checker)).To(ContainElement(metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: "no device references managed resource claim \"claim2\"; a managed claim must have at least one device",
+				Field:   "spec.resourceClaims[1]",
+			}))
+		})
+
+		It("should not require devices to reference non-managed claims", func() {
+			// Direct and template claims are authored by the user and may
+			// legitimately carry requests the VMI does not consume.
+			spec := gpuSpec(
+				[]v1.VirtualMachineInstanceResourceClaim{resourceClaim(claim1)},
+			)
+
+			Expect(validateCreationDRA(field, spec, checker)).To(BeEmpty())
+		})
+
+		It("should reject duplicate claimName/requestName pairs within a managed claim", func() {
+			checker.hostDeviceDRAEnabled = true
+			spec := &v1.VirtualMachineInstanceSpec{
+				ResourceClaims: []v1.VirtualMachineInstanceResourceClaim{managedClaim(claim1, "pcie-aligned")},
+				Domain: v1.DomainSpec{
+					Devices: v1.Devices{
+						GPUs:        []v1.GPU{gpuWithClaimRequest("gpu0", claim1, req1)},
+						HostDevices: []v1.HostDevice{hostDeviceWithClaimRequest("hd0", claim1, req1)},
+					},
+				},
+			}
+
+			Expect(validateCreationDRA(field, spec, checker)).To(ContainElement(HaveField(
+				"Type", metav1.CauseTypeFieldValueDuplicate)))
 		})
 	})
 
