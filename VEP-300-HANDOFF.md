@@ -202,7 +202,7 @@ The `BUILD.bazel` files here were hand-written from the known import set and ver
 `go build`. Run `hack/bazel-generate.sh` on the fast machine to let gazelle/buildifier reconcile
 them (expected to be a no-op or whitespace-only); commit any delta as a separate generated commit.
 
-### Step 3 — `ManagedClaimsReady` condition (single-writer)
+### Step 3 — `ManagedClaimsReady` condition (single-writer) — DONE
 
 **Design constraint:** VMI status has a single writer, virt-controller, which persists it via a
 full-object `Update` (`pkg/virt-controller/watch/vmi/vmi.go`). A provisioner controller must **never**
@@ -219,13 +219,18 @@ Done in this branch:
   `aggregateManagedClaimsConditions(vmiCopy, claims)`: True once every managed entry has a
   ResourceClaim with `.status.allocation` set, False otherwise. Unit-tested in `managedclaims_test.go`.
 
-Remaining (integration, not yet wired): call `aggregateManagedClaimsConditions` from
-`updateStatus` in `lifecycle.go` next to `aggregateDataVolumesConditions` (~line 307), fed by a new
-ResourceClaim informer/indexer on the `vmi.Controller` (the `ResourceClaim()` informer already
-exists in `pkg/controller/virtinformers.go` from Step 2, so reuse it; add a `NewController` param, an
-enqueue-owning-VMI event handler, and a namespace+owner list in the sync path), all gated on
-`ManagedDRAClaims`. This uses the vendored
-`k8s.io/api/resource/v1` client — **no codegen** — but is best landed alongside Step 2 (the producer).
+Integration wiring done in this branch:
+- `pkg/virt-controller/watch/vmi/resourceclaims.go` adds the ResourceClaim event handlers
+  (`addResourceClaim` / `updateResourceClaim` / `deleteResourceClaim`) that resolve the controller
+  owner reference back to the VMI and re-enqueue it, plus `listManagedResourceClaimsForVMI` which
+  returns the claims a VMI owns in its namespace.
+- `vmi.go` takes a `resourceClaimInformer` `NewController` param, keeps a `resourceClaimIndexer`,
+  adds it to `hasSynced`, and registers the handlers. `application.go` wires
+  `informerFactory.ResourceClaim()`; all three `NewController` callers updated.
+- `lifecycle.go` `updateStatus` calls `aggregateManagedClaimsConditions(vmiCopy,
+  c.listManagedResourceClaimsForVMI(vmi))` next to `aggregateDataVolumesConditions`, gated on
+  `clusterConfig.ManagedDRAClaimsEnabled()`. Uses the vendored `k8s.io/api/resource/v1` client, no
+  codegen. Tested in `vmi_test.go` (enqueue, list, and gated condition on/off).
 
 ### Step 4 — virt-operator wiring
 
