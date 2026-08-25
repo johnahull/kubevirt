@@ -78,6 +78,7 @@ type templateData struct {
 	VirtExportProxyImage               string
 	VirtExportServerImage              string
 	VirtSynchronizationControllerImage string
+	VirtManagedClaimControllerImage    string
 	VirtTemplateApiserverImage         string
 	VirtTemplateControllerImage        string
 	GsImage                            string
@@ -116,6 +117,7 @@ func main() {
 	virtExportProxyImage := flag.String("virt-export-proxy-image", "", "custom image for virt-export-proxy. "+customImageExample)
 	virtExportServerImage := flag.String("virt-export-server-image", "", "custom image for virt-export-server. "+customImageExample)
 	virtSynchronizationControllerImage := flag.String("virt-synchronization-controller-image", "", "custom image for virt-synchronization-controller. "+customImageExample)
+	virtManagedClaimControllerImage := flag.String("virt-managedclaim-controller-image", "", "custom image for virt-managedclaim-controller. "+customImageExample)
 	virtTemplateApiserverImage := flag.String("virt-template-apiserver-image", "", "custom image for virt-template-apiserver. "+customImageExample)
 	virtTemplateControllerImage := flag.String("virt-template-controller-image", "", "custom image for virt-template-controller. "+customImageExample)
 	gsImage := flag.String("gs-image", "", "custom image for gs. "+customImageExample)
@@ -170,6 +172,7 @@ func main() {
 		data.VirtExportProxyImage = *virtExportProxyImage
 		data.VirtExportServerImage = *virtExportServerImage
 		data.VirtSynchronizationControllerImage = *virtSynchronizationControllerImage
+		data.VirtManagedClaimControllerImage = *virtManagedClaimControllerImage
 		data.VirtTemplateApiserverImage = *virtTemplateApiserverImage
 		data.VirtTemplateControllerImage = *virtTemplateControllerImage
 		data.GsImage = *gsImage
@@ -210,6 +213,7 @@ func main() {
 		data.VirtExportProxyImage = "{{.VirtExportProxyImage}}"
 		data.VirtExportServerImage = "{{.VirtExportServerImage}}"
 		data.VirtSynchronizationControllerImage = "{{.VirtSynchronizationControllerImage}}"
+		data.VirtManagedClaimControllerImage = "{{.VirtManagedClaimControllerImage}}"
 		data.VirtTemplateApiserverImage = "{{.VirtTemplateApiserverImage}}"
 		data.VirtTemplateControllerImage = "{{.VirtTemplateControllerImage}}"
 		data.GsImage = "{{.GsImage}}"
@@ -282,6 +286,7 @@ func getOperatorDeploymentSpec(data templateData, indentation int) string {
 		data.VirtExportProxyImage,
 		data.VirtExportServerImage,
 		data.VirtSynchronizationControllerImage,
+		data.VirtManagedClaimControllerImage,
 		data.VirtTemplateApiserverImage,
 		data.VirtTemplateControllerImage,
 		data.GsImage,
