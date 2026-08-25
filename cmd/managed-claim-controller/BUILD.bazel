@@ -1,0 +1,68 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_pkg//:pkg.bzl", "pkg_tar")
+load("//bazel:image.bzl", "kubevirt_image")
+load("//staging/src/kubevirt.io/client-go/version:def.bzl", "version_x_defs")
+
+go_library(
+    name = "go_default_library",
+    srcs = ["managed-claim-controller.go"],
+    importpath = "kubevirt.io/kubevirt/cmd/managed-claim-controller",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/controller:go_default_library",
+        "//pkg/managed-claim:go_default_library",
+        "//pkg/managed-claim/aligner:go_default_library",
+        "//pkg/service:go_default_library",
+        "//pkg/util/ratelimiter:go_default_library",
+        "//pkg/virt-config:go_default_library",
+        "//pkg/virt-controller/leaderelectionconfig:go_default_library",
+        "//staging/src/kubevirt.io/client-go/kubecli:go_default_library",
+        "//staging/src/kubevirt.io/client-go/kubevirt/scheme:go_default_library",
+        "//staging/src/kubevirt.io/client-go/log:go_default_library",
+        "//staging/src/kubevirt.io/client-go/util:go_default_library",
+        "//vendor/k8s.io/api/core/v1:go_default_library",
+        "//vendor/k8s.io/client-go/kubernetes/typed/core/v1:go_default_library",
+        "//vendor/k8s.io/client-go/rest:go_default_library",
+        "//vendor/k8s.io/client-go/tools/leaderelection:go_default_library",
+        "//vendor/k8s.io/client-go/tools/leaderelection/resourcelock:go_default_library",
+        "//vendor/k8s.io/client-go/tools/record:go_default_library",
+        "//vendor/k8s.io/client-go/util/flowcontrol:go_default_library",
+    ],
+)
+
+go_binary(
+    name = "virt-managed-claim-controller",
+    embed = [":go_default_library"],
+    visibility = ["//visibility:public"],
+)
+
+pkg_tar(
+    name = "get-version",
+    srcs = [
+        "//:get-version",
+    ],
+    package_dir = "/",
+)
+
+pkg_tar(
+    name = "virt-managed-claim-tar",
+    srcs = [
+        ":virt-managed-claim-controller",
+    ],
+    package_dir = "/usr/bin/",
+)
+
+kubevirt_image(
+    name = "version-container",
+    base = "//:passwd-image",
+    tars = [":get-version"],
+)
+
+kubevirt_image(
+    name = "virt-managed-claim-controller-image",
+    base = ":version-container",
+    entrypoint = ["/usr/bin/virt-managed-claim-controller"],
+    tars = [":virt-managed-claim-tar"],
+    user = "1001",
+    visibility = ["//visibility:public"],
+)

@@ -292,6 +292,13 @@ image_push(
 )
 
 image_push(
+    name = "push-virt-managed-claim-controller",
+    image = "//cmd/managed-claim-controller:virt-managed-claim-controller-image",
+    registry = "quay.io",
+    repository = "kubevirt/virt-managed-claim-controller",
+)
+
+image_push(
     name = "push-pr-helper",
     image = "//cmd/pr-helper:pr-helper-image",
     registry = "quay.io",
