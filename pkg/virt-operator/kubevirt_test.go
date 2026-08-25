@@ -92,9 +92,11 @@ const (
 	NAMESPACE = "kubevirt-test"
 
 	// +1 for ContainerPathVolumes webhook (always enabled in tests)
-	resourceCount = 96 + virtTemplateResourceCount
-	patchCount    = 64 + virtTemplatePatchCount
-	updateCount   = 33 + virtTemplateUpdateCount
+	// +1 for the ManagedClaimProvisioner CRD (always installed)
+	resourceCount = 97 + virtTemplateResourceCount
+	// +1 for the ManagedClaimProvisioner CRD (always patched on update)
+	patchCount  = 65 + virtTemplatePatchCount
+	updateCount = 33 + virtTemplateUpdateCount
 
 	// 1 because a temporary validation webhook is created to block new CRDs until api server is deployed
 	expectedTemporaryResources = 1
@@ -119,6 +121,7 @@ var (
 		components.NewMigrationPolicyCrd, components.NewVirtualMachinePreferenceCrd,
 		components.NewVirtualMachineClusterPreferenceCrd, components.NewVirtualMachineCloneCrd,
 		components.NewVirtualMachineBackupTrackerCrd, components.NewPluginCrd,
+		components.NewManagedClaimProvisionerCrd,
 	}
 	numCRDs = len(crdFunctions) + numVirtTemplateCRDs
 
