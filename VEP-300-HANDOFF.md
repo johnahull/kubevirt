@@ -27,8 +27,10 @@ implementation. Continue that way.
 | Device collection, request/config building, aligner | `pkg/managed-claim`, `.../aligner` | ✅ green (before the reconciler was added) |
 | Launcher pod rendering caller | `pkg/virt-controller/services` | ✅ green |
 | Rule 6 — `ManagedClaimProvisioner` admitter | `pkg/virt-api/.../admitters` | ✅ 9 specs green |
-| **Rule 4 — immutability** | `pkg/virt-api/.../admitters` | ⚠️ **NOT RUN since rewrite** |
-| **Reconciler** | `pkg/managed-claim` | ⚠️ **NEVER RUN GREEN** |
+| Rule 4 — immutability | `pkg/virt-api/.../admitters` | ✅ verified green |
+| Reconciler | `pkg/managed-claim` | ✅ compiles and green |
+| `ManagedClaimsReady` aggregation | `pkg/virt-controller/watch/vmi` | ✅ 7 specs green |
+| Codegen (Step 0) | whole tree | ✅ make generate clean; whole tree builds |
 
 ### First thing to do on the fast machine
 
@@ -125,17 +127,31 @@ These are load-bearing; a reviewer or refactor could undo them by accident.
 
 ## Remaining work
 
-### Step 0 — unblock codegen (prerequisite for steps 2 and 3)
+### Step 0 — unblock codegen (prerequisite for steps 2 and 3) — DONE
 
-```bash
-sudo usermod -aG docker $USER && newgrp docker
-make generate && make build
-```
+Codegen ran with rootless **podman** (no docker needed). KubeVirt auto-selects the
+runtime (`hack/common.sh` tries `podman ps` first). The one snag on rootless podman is
+that `hack/dockerized` syncs the tree with `rsync -al`, and preserving owner/group fails
+inside the user namespace (`chown ... Invalid argument`); adding `--no-o --no-g` to the
+`_rsync` helper fixes it. That edit is an environment workaround, not part of the feature:
+it is held with `git update-index --skip-worktree hack/dockerized` and must not be committed.
 
-This produces what the first machine could not: `types_swagger_generated.go`,
-`openapi_generated.go`, the **kubevirt clientset/listers/informers for `ManagedClaimProvisioner`**,
-`components/validations_generated.go`, controller-gen CRD output, and `BUILD.bazel` files.
-Commit generated output separately from hand-written code.
+Two `make generate` failures were real work, both now committed:
+- `hack/bootstrap-ginkgo.sh` keys off the `*_suite_test.go` filename, so the aligner
+  package (its `TestAligner` lived in `aligner_test.go`) tripped auto-generation. Fixed by
+  giving it a conventional suite file.
+- `ManagedClaimProvisionerList.Items` has no `listType` marker (like every other `*List`),
+  so it was added to `api/api-rule-violations-known.list`.
+
+Generated and committed: `types_swagger_generated.go` (core/v1 and core/v1alpha1),
+`openapi_generated.go`, swagger.json, the **kubevirt v1alpha1 typed clientset + fake**,
+scheme/clientset registration, `components/validations_generated.go`, apitesting golden
+data, and `BUILD.bazel` files. Generated output is committed separately from hand-written code.
+
+**No listers/informers were generated, and none will be** — KubeVirt runs no
+lister-gen/informer-gen (see `hack/generate.sh`). Informers are hand-built in
+`pkg/controller/virtinformers.go` with `cache.NewSharedIndexInformer` over a ListWatch on
+the clientset. This changes Step 2 (below).
 
 > **Open question to settle before investing in codegen:** the VEP specifies
 > `apiVersion: kubevirt.io/v1alpha1`, which is the **core** group — and core currently serves only
@@ -166,15 +182,25 @@ managedclaim.NewReconciler(
 )
 ```
 
-The only genuinely new piece is a `ProvisionerStore` backed by the generated lister:
+The only genuinely new piece is a `ProvisionerStore`. There is **no generated lister**
+(see Step 0), so back it with the ManagedClaimProvisioner informer's indexer. A
+`cache.NewGenericLister(informer.GetIndexer(), corev1alpha1.Resource("managedclaimprovisioners"))`
+returns a real `apierrors` NotFound, which Rule 3 relies on:
 
 ```go
-type listerStore struct{ lister v1alpha1listers.ManagedClaimProvisionerLister }
+type listerStore struct{ lister cache.GenericLister }
 
 func (s *listerStore) Get(name string) (*corev1alpha1.ManagedClaimProvisioner, error) {
-    return s.lister.Get(name)   // returns a NotFound APIStatus error, which Rule 3 relies on
+    obj, err := s.lister.Get(name)   // NotFound APIStatus error when absent
+    if err != nil {
+        return nil, err
+    }
+    return obj.(*corev1alpha1.ManagedClaimProvisioner), nil
 }
 ```
+
+Build the informer itself in `pkg/controller/virtinformers.go` alongside the others, with a
+ListWatch on `kubevirt.KubevirtV1alpha1().ManagedClaimProvisioners()`.
 
 Still needed around it: VMI + ManagedClaimProvisioner informers, a workqueue, and expectations
 (reuse `pkg/controller/expectations.go` — do not write new machinery). The VEP asks the framework to
