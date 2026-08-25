@@ -54,17 +54,22 @@ var _ = Describe("ManagedClaimName", func() {
 		Expect(name).To(Equal(vmiName + "-" + claimName))
 	})
 
-	It("should truncate and append a hash when one character over the limit", func() {
-		claimName := "claim"
-		vmiName := strings.Repeat("a", maxManagedClaimNameLen-len(claimName))
+	It("should keep a prefix of both names and append a hash when over the limit", func() {
+		// A long VMI name must not truncate the claim name away entirely:
+		// both names keep a fixed-length prefix so each stays recognizable.
+		// 253 - 5 (hash) - 2 (separators) == 246, split evenly == 123 each.
+		vmiName := strings.Repeat("a", 200)
+		claimName := strings.Repeat("b", 200)
 		untruncated := vmiName + "-" + claimName
-		Expect(untruncated).To(HaveLen(maxManagedClaimNameLen + 1))
+		Expect(untruncated).To(HaveLen(401))
 
 		name := ManagedClaimName(vmiName, claimName)
 
-		Expect(name).To(HaveLen(maxManagedClaimNameLen))
-		Expect(name).NotTo(Equal(untruncated))
-		Expect(name).To(HavePrefix(untruncated[:maxManagedClaimNameLen-managedClaimHashLen-1]))
+		Expect(len(name)).To(BeNumerically("<=", maxManagedClaimNameLen))
+		Expect(name).To(HavePrefix(vmiName[:123]))
+		Expect(name).To(ContainSubstring(claimName[:123]))
+		// The full VMI name is not carried through: it is truncated to 123.
+		Expect(name).NotTo(ContainSubstring(vmiName))
 	})
 
 	It("should distinguish names that differ only past the truncation point", func() {
@@ -75,8 +80,8 @@ var _ = Describe("ManagedClaimName", func() {
 		first := ManagedClaimName(prefix+"-one", "claim")
 		second := ManagedClaimName(prefix+"-two", "claim")
 
-		Expect(first).To(HaveLen(maxManagedClaimNameLen))
-		Expect(second).To(HaveLen(maxManagedClaimNameLen))
+		Expect(len(first)).To(BeNumerically("<=", maxManagedClaimNameLen))
+		Expect(len(second)).To(BeNumerically("<=", maxManagedClaimNameLen))
 		Expect(first).NotTo(Equal(second))
 	})
 
@@ -94,5 +99,6 @@ var _ = Describe("ManagedClaimName", func() {
 		Entry("at the limit", strings.Repeat("a", maxManagedClaimNameLen-6), "claim"),
 		Entry("well over the limit", strings.Repeat("a", 400), "claim"),
 		Entry("long claim name", "vm", strings.Repeat("z", 400)),
+		Entry("both names long", strings.Repeat("a", 200), strings.Repeat("b", 200)),
 	)
 })
