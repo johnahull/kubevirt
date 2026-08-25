@@ -146,3 +146,7 @@ func ServeVirtualMachineClones(resp http.ResponseWriter, req *http.Request, clus
 func ServePlugins(resp http.ResponseWriter, req *http.Request, clusterConfig *virtconfig.ClusterConfig) {
 	validating_webhooks.Serve(resp, req, admitters.NewPluginAdmitter(clusterConfig))
 }
+
+func ServeManagedClaimProvisioner(resp http.ResponseWriter, req *http.Request, clusterConfig *virtconfig.ClusterConfig) {
+	validating_webhooks.Serve(resp, req, admitters.NewManagedClaimProvisionerAdmitter(clusterConfig))
+}
