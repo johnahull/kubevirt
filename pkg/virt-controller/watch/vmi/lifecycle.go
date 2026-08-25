@@ -306,6 +306,10 @@ func (c *Controller) updateStatus(vmi *virtv1.VirtualMachineInstance, pod *k8sv1
 
 	aggregateDataVolumesConditions(vmiCopy, dataVolumes)
 
+	if c.clusterConfig.ManagedDRAClaimsEnabled() {
+		aggregateManagedClaimsConditions(vmiCopy, c.listManagedResourceClaimsForVMI(vmi))
+	}
+
 	if pvc := backendstorage.PVCForVMI(c.pvcIndexer, vmi); pvc != nil {
 		c.backendStorage.UpdateVolumeStatus(vmiCopy, pvc)
 	}
