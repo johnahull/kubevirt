@@ -102,6 +102,20 @@ func newApiServerClusterRole() *rbacv1.ClusterRole {
 				},
 			},
 			{
+				// The VMI create webhook rejects references to a
+				// ManagedClaimProvisioner that does not exist, which means
+				// reading them from a local cache.
+				APIGroups: []string{
+					GroupName,
+				},
+				Resources: []string{
+					"managedclaimprovisioners",
+				},
+				Verbs: []string{
+					"get", "list", "watch",
+				},
+			},
+			{
 				APIGroups: []string{
 					"",
 				},
