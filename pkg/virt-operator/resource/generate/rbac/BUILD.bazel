@@ -8,6 +8,7 @@ go_library(
         "controller.go",
         "exportproxy.go",
         "handler.go",
+        "managedclaimcontroller.go",
         "operator.go",
         "servicemonitor.go",
         "synchronizationcontroller.go",
@@ -37,6 +38,7 @@ go_test(
     srcs = [
         "cluster_test.go",
         "controller_test.go",
+        "managedclaimcontroller_test.go",
         "operator_test.go",
         "rbac_suite_test.go",
         "synchronizationcontroller_test.go",
