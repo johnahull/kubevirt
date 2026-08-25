@@ -47,9 +47,10 @@ func (VirtualMachineInstanceSpec) SwaggerDoc() map[string]string {
 
 func (VirtualMachineInstanceResourceClaim) SwaggerDoc() map[string]string {
 	return map[string]string{
-		"name":                      "Name uniquely identifies this resource claim inside the VMI.\nThis field is required and must be a DNS_LABEL.",
-		"resourceClaimName":         "ResourceClaimName is the name of a ResourceClaim object in the same\nnamespace as this VMI.\n\nExactly one of ResourceClaimName and ResourceClaimTemplateName must\nbe set.",
-		"resourceClaimTemplateName": "ResourceClaimTemplateName is the name of a ResourceClaimTemplate\nobject in the same namespace as this VMI.\n\nThe template name is passed through to the generated virt-launcher Pod\nspec. From the Pod spec, the template is used to create a new\nResourceClaim, which is bound to the virt-launcher Pod. When the\nvirt-launcher Pod is deleted, the ResourceClaim is also deleted. The\ngenerated ResourceClaim name is unique and is recorded in\npod.status.resourceClaimStatuses.\n\nExactly one of ResourceClaimName and ResourceClaimTemplateName must\nbe set.",
+		"name":                        "Name uniquely identifies this resource claim inside the VMI.\nThis field is required and must be a DNS_LABEL.",
+		"resourceClaimName":           "ResourceClaimName is the name of a ResourceClaim object in the same\nnamespace as this VMI.\n\nExactly one of ResourceClaimName, ResourceClaimTemplateName, or\nManagedClaimProvisionerName must be set.",
+		"resourceClaimTemplateName":   "ResourceClaimTemplateName is the name of a ResourceClaimTemplate\nobject in the same namespace as this VMI.\n\nThe template name is passed through to the generated virt-launcher Pod\nspec. From the Pod spec, the template is used to create a new\nResourceClaim, which is bound to the virt-launcher Pod. When the\nvirt-launcher Pod is deleted, the ResourceClaim is also deleted. The\ngenerated ResourceClaim name is unique and is recorded in\npod.status.resourceClaimStatuses.\n\nExactly one of ResourceClaimName, ResourceClaimTemplateName, or\nManagedClaimProvisionerName must be set.",
+		"managedClaimProvisionerName": "ManagedClaimProvisionerName references a cluster-scoped\nManagedClaimProvisioner object that controls how the ResourceClaim is\ngenerated.\n\nThe managed-claim framework passes the VMI device declarations that\nreference this entry to the matching provisioner controller, which\ngenerates a ResourceClaim named <vmi-name>-<claim-name>. The claim is\nowned by the VMI and garbage collected with it.\n\nExactly one of ResourceClaimName, ResourceClaimTemplateName, or\nManagedClaimProvisionerName must be set.\n\nThis field requires the ManagedDRAClaims feature gate.\nThis feature is in alpha.\n+optional",
 	}
 }
 

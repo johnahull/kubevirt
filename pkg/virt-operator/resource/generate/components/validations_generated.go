@@ -4101,6 +4101,115 @@ var CRDsValidation map[string]string = map[string]string{
   - spec
   type: object
 `,
+	"managedclaimprovisioner": `openAPIV3Schema:
+  description: |-
+    ManagedClaimProvisioner encodes the DeviceClass mappings and the name of the
+    provisioner controller used to generate a ResourceClaim for a VMI.
+
+    Admins create ManagedClaimProvisioner objects; users reference one by name
+    from vmi.spec.resourceClaims[].managedClaimProvisionerName and declare their
+    devices as usual. The referenced provisioner controller receives every device
+    declaration for the managed claim and assembles the ResourceClaim.
+
+    This resource is in alpha and requires the ManagedDRAClaims feature gate.
+  properties:
+    apiVersion:
+      description: |-
+        APIVersion defines the versioned schema of this representation of an object.
+        Servers should convert recognized schemas to the latest internal value, and
+        may reject unrecognized values.
+        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+      type: string
+    kind:
+      description: |-
+        Kind is a string value representing the REST resource this object represents.
+        Servers may infer this from the endpoint the client submits requests to.
+        Cannot be updated.
+        In CamelCase.
+        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+      type: string
+    metadata:
+      type: object
+    spec:
+      description: Spec defines the provisioner controller and its DeviceClass mappings.
+      properties:
+        deviceTypes:
+          description: |-
+            DeviceTypes maps VMI device declarations to DeviceClass names and
+            optional driver-specific configuration.
+
+            Each entry's name must be unique and one of cpu, gpu, hostDevice, or
+            network. Every device type referenced by a device in the managed claim
+            must have an entry here.
+          items:
+            properties:
+              deviceClassName:
+                description: |-
+                  DeviceClassName is the DeviceClass used for every request generated for
+                  this device type.
+                type: string
+              name:
+                description: |-
+                  Name is the VMI device declaration this entry configures: one of
+                  cpu, gpu, hostDevice, or network.
+                type: string
+              opaque:
+                description: |-
+                  Opaque is driver-specific configuration. When set, the provisioner
+                  renders a DeviceClaimConfiguration into the generated
+                  ResourceClaim.spec.devices.config, with requests set to every generated
+                  request for this device type.
+                properties:
+                  driver:
+                    description: |-
+                      Driver is used to determine which kubelet plugin needs
+                      to be passed these configuration parameters.
+
+                      An admission policy provided by the driver developer could use this
+                      to decide whether it needs to validate them.
+
+                      Must be a DNS subdomain and should end with a DNS domain owned by the
+                      vendor of the driver.
+                    type: string
+                  parameters:
+                    description: |-
+                      Parameters can contain arbitrary data. It is the responsibility of
+                      the driver developer to handle validation and versioning. Typically this
+                      includes self-identification and a version ("kind" + "apiVersion" for
+                      Kubernetes types), with conversion between different versions.
+
+                      The length of the raw data must be smaller or equal to 10 Ki.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                required:
+                - driver
+                - parameters
+                type: object
+            required:
+            - deviceClassName
+            - name
+            type: object
+          type: array
+          x-kubernetes-list-map-keys:
+          - name
+          x-kubernetes-list-type: map
+        provisioner:
+          description: |-
+            Provisioner identifies the controller responsible for claim generation.
+            KubeVirt ships policy.kubevirt.io/aligner, which applies PCIe-root and
+            NUMA topology alignment. Third-party controllers use their own name.
+
+            A managed claim is only reconciled once a controller serving this
+            provisioner name is running; until then the launcher pod stays pending.
+          type: string
+      required:
+      - deviceTypes
+      - provisioner
+      type: object
+  required:
+  - spec
+  type: object
+`,
 	"migrationpolicy": `openAPIV3Schema:
   description: MigrationPolicy holds migration policy (i.e. configurations) to apply
     to a VM or group of VMs
@@ -8126,6 +8235,23 @@ var CRDsValidation map[string]string = map[string]string{
                     This feature is in alpha.
                   items:
                     properties:
+                      managedClaimProvisionerName:
+                        description: |-
+                          ManagedClaimProvisionerName references a cluster-scoped
+                          ManagedClaimProvisioner object that controls how the ResourceClaim is
+                          generated.
+
+                          The managed-claim framework passes the VMI device declarations that
+                          reference this entry to the matching provisioner controller, which
+                          generates a ResourceClaim named <vmi-name>-<claim-name>. The claim is
+                          owned by the VMI and garbage collected with it.
+
+                          Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                          ManagedClaimProvisionerName must be set.
+
+                          This field requires the ManagedDRAClaims feature gate.
+                          This feature is in alpha.
+                        type: string
                       name:
                         description: |-
                           Name uniquely identifies this resource claim inside the VMI.
@@ -8136,8 +8262,8 @@ var CRDsValidation map[string]string = map[string]string{
                           ResourceClaimName is the name of a ResourceClaim object in the same
                           namespace as this VMI.
 
-                          Exactly one of ResourceClaimName and ResourceClaimTemplateName must
-                          be set.
+                          Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                          ManagedClaimProvisionerName must be set.
                         type: string
                       resourceClaimTemplateName:
                         description: |-
@@ -8151,8 +8277,8 @@ var CRDsValidation map[string]string = map[string]string{
                           generated ResourceClaim name is unique and is recorded in
                           pod.status.resourceClaimStatuses.
 
-                          Exactly one of ResourceClaimName and ResourceClaimTemplateName must
-                          be set.
+                          Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                          ManagedClaimProvisionerName must be set.
                         type: string
                     required:
                     - name
@@ -14321,6 +14447,23 @@ var CRDsValidation map[string]string = map[string]string{
             This feature is in alpha.
           items:
             properties:
+              managedClaimProvisionerName:
+                description: |-
+                  ManagedClaimProvisionerName references a cluster-scoped
+                  ManagedClaimProvisioner object that controls how the ResourceClaim is
+                  generated.
+
+                  The managed-claim framework passes the VMI device declarations that
+                  reference this entry to the matching provisioner controller, which
+                  generates a ResourceClaim named <vmi-name>-<claim-name>. The claim is
+                  owned by the VMI and garbage collected with it.
+
+                  Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                  ManagedClaimProvisionerName must be set.
+
+                  This field requires the ManagedDRAClaims feature gate.
+                  This feature is in alpha.
+                type: string
               name:
                 description: |-
                   Name uniquely identifies this resource claim inside the VMI.
@@ -14331,8 +14474,8 @@ var CRDsValidation map[string]string = map[string]string{
                   ResourceClaimName is the name of a ResourceClaim object in the same
                   namespace as this VMI.
 
-                  Exactly one of ResourceClaimName and ResourceClaimTemplateName must
-                  be set.
+                  Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                  ManagedClaimProvisionerName must be set.
                 type: string
               resourceClaimTemplateName:
                 description: |-
@@ -14346,8 +14489,8 @@ var CRDsValidation map[string]string = map[string]string{
                   generated ResourceClaim name is unique and is recorded in
                   pod.status.resourceClaimStatuses.
 
-                  Exactly one of ResourceClaimName and ResourceClaimTemplateName must
-                  be set.
+                  Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                  ManagedClaimProvisionerName must be set.
                 type: string
             required:
             - name
@@ -21143,6 +21286,23 @@ var CRDsValidation map[string]string = map[string]string{
                     This feature is in alpha.
                   items:
                     properties:
+                      managedClaimProvisionerName:
+                        description: |-
+                          ManagedClaimProvisionerName references a cluster-scoped
+                          ManagedClaimProvisioner object that controls how the ResourceClaim is
+                          generated.
+
+                          The managed-claim framework passes the VMI device declarations that
+                          reference this entry to the matching provisioner controller, which
+                          generates a ResourceClaim named <vmi-name>-<claim-name>. The claim is
+                          owned by the VMI and garbage collected with it.
+
+                          Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                          ManagedClaimProvisionerName must be set.
+
+                          This field requires the ManagedDRAClaims feature gate.
+                          This feature is in alpha.
+                        type: string
                       name:
                         description: |-
                           Name uniquely identifies this resource claim inside the VMI.
@@ -21153,8 +21313,8 @@ var CRDsValidation map[string]string = map[string]string{
                           ResourceClaimName is the name of a ResourceClaim object in the same
                           namespace as this VMI.
 
-                          Exactly one of ResourceClaimName and ResourceClaimTemplateName must
-                          be set.
+                          Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                          ManagedClaimProvisionerName must be set.
                         type: string
                       resourceClaimTemplateName:
                         description: |-
@@ -21168,8 +21328,8 @@ var CRDsValidation map[string]string = map[string]string{
                           generated ResourceClaim name is unique and is recorded in
                           pod.status.resourceClaimStatuses.
 
-                          Exactly one of ResourceClaimName and ResourceClaimTemplateName must
-                          be set.
+                          Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                          ManagedClaimProvisionerName must be set.
                         type: string
                     required:
                     - name
@@ -26339,6 +26499,23 @@ var CRDsValidation map[string]string = map[string]string{
                             This feature is in alpha.
                           items:
                             properties:
+                              managedClaimProvisionerName:
+                                description: |-
+                                  ManagedClaimProvisionerName references a cluster-scoped
+                                  ManagedClaimProvisioner object that controls how the ResourceClaim is
+                                  generated.
+
+                                  The managed-claim framework passes the VMI device declarations that
+                                  reference this entry to the matching provisioner controller, which
+                                  generates a ResourceClaim named <vmi-name>-<claim-name>. The claim is
+                                  owned by the VMI and garbage collected with it.
+
+                                  Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                                  ManagedClaimProvisionerName must be set.
+
+                                  This field requires the ManagedDRAClaims feature gate.
+                                  This feature is in alpha.
+                                type: string
                               name:
                                 description: |-
                                   Name uniquely identifies this resource claim inside the VMI.
@@ -26349,8 +26526,8 @@ var CRDsValidation map[string]string = map[string]string{
                                   ResourceClaimName is the name of a ResourceClaim object in the same
                                   namespace as this VMI.
 
-                                  Exactly one of ResourceClaimName and ResourceClaimTemplateName must
-                                  be set.
+                                  Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                                  ManagedClaimProvisionerName must be set.
                                 type: string
                               resourceClaimTemplateName:
                                 description: |-
@@ -26364,8 +26541,8 @@ var CRDsValidation map[string]string = map[string]string{
                                   generated ResourceClaim name is unique and is recorded in
                                   pod.status.resourceClaimStatuses.
 
-                                  Exactly one of ResourceClaimName and ResourceClaimTemplateName must
-                                  be set.
+                                  Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                                  ManagedClaimProvisionerName must be set.
                                 type: string
                             required:
                             - name
@@ -32028,6 +32205,23 @@ var CRDsValidation map[string]string = map[string]string{
                                 This feature is in alpha.
                               items:
                                 properties:
+                                  managedClaimProvisionerName:
+                                    description: |-
+                                      ManagedClaimProvisionerName references a cluster-scoped
+                                      ManagedClaimProvisioner object that controls how the ResourceClaim is
+                                      generated.
+
+                                      The managed-claim framework passes the VMI device declarations that
+                                      reference this entry to the matching provisioner controller, which
+                                      generates a ResourceClaim named <vmi-name>-<claim-name>. The claim is
+                                      owned by the VMI and garbage collected with it.
+
+                                      Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                                      ManagedClaimProvisionerName must be set.
+
+                                      This field requires the ManagedDRAClaims feature gate.
+                                      This feature is in alpha.
+                                    type: string
                                   name:
                                     description: |-
                                       Name uniquely identifies this resource claim inside the VMI.
@@ -32038,8 +32232,8 @@ var CRDsValidation map[string]string = map[string]string{
                                       ResourceClaimName is the name of a ResourceClaim object in the same
                                       namespace as this VMI.
 
-                                      Exactly one of ResourceClaimName and ResourceClaimTemplateName must
-                                      be set.
+                                      Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                                      ManagedClaimProvisionerName must be set.
                                     type: string
                                   resourceClaimTemplateName:
                                     description: |-
@@ -32053,8 +32247,8 @@ var CRDsValidation map[string]string = map[string]string{
                                       generated ResourceClaim name is unique and is recorded in
                                       pod.status.resourceClaimStatuses.
 
-                                      Exactly one of ResourceClaimName and ResourceClaimTemplateName must
-                                      be set.
+                                      Exactly one of ResourceClaimName, ResourceClaimTemplateName, or
+                                      ManagedClaimProvisionerName must be set.
                                     type: string
                                 required:
                                 - name

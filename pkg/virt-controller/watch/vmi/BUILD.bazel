@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "datavolumes.go",
         "lifecycle.go",
+        "managedclaims.go",
         "storage.go",
         "vmi.go",
         "volume-hotplug.go",
@@ -14,6 +15,7 @@ go_library(
     deps = [
         "//pkg/apimachinery/patch:go_default_library",
         "//pkg/controller:go_default_library",
+        "//pkg/dra:go_default_library",
         "//pkg/monitoring/metrics/common/vmisync:go_default_library",
         "//pkg/pointer:go_default_library",
         "//pkg/storage/backend-storage:go_default_library",
@@ -33,6 +35,7 @@ go_library(
         "//staging/src/kubevirt.io/client-go/kubecli:go_default_library",
         "//staging/src/kubevirt.io/client-go/log:go_default_library",
         "//vendor/k8s.io/api/core/v1:go_default_library",
+        "//vendor/k8s.io/api/resource/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/api/equality:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/api/errors:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/api/resource:go_default_library",
@@ -52,6 +55,7 @@ go_library(
 go_test(
     name = "go_default_test",
     srcs = [
+        "managedclaims_test.go",
         "vmi_suite_test.go",
         "vmi_test.go",
     ],
@@ -60,6 +64,7 @@ go_test(
     deps = [
         "//pkg/controller:go_default_library",
         "//pkg/controller/testing:go_default_library",
+        "//pkg/dra:go_default_library",
         "//pkg/libvmi:go_default_library",
         "//pkg/pointer:go_default_library",
         "//pkg/storage/backend-storage:go_default_library",
@@ -86,6 +91,7 @@ go_test(
         "//vendor/github.com/onsi/gomega/types:go_default_library",
         "//vendor/go.uber.org/mock/gomock:go_default_library",
         "//vendor/k8s.io/api/core/v1:go_default_library",
+        "//vendor/k8s.io/api/resource/v1:go_default_library",
         "//vendor/k8s.io/api/storage/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/api/equality:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/api/errors:go_default_library",

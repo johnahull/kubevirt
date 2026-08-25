@@ -627,6 +627,10 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"kubevirt.io/api/core/v1.VolumeUpdateState":                                                       schema_kubevirtio_api_core_v1_VolumeUpdateState(ref),
 		"kubevirt.io/api/core/v1.Watchdog":                                                                schema_kubevirtio_api_core_v1_Watchdog(ref),
 		"kubevirt.io/api/core/v1.WatchdogDevice":                                                          schema_kubevirtio_api_core_v1_WatchdogDevice(ref),
+		"kubevirt.io/api/core/v1alpha1.ManagedClaimDeviceType":                                            schema_kubevirtio_api_core_v1alpha1_ManagedClaimDeviceType(ref),
+		"kubevirt.io/api/core/v1alpha1.ManagedClaimProvisioner":                                           schema_kubevirtio_api_core_v1alpha1_ManagedClaimProvisioner(ref),
+		"kubevirt.io/api/core/v1alpha1.ManagedClaimProvisionerList":                                       schema_kubevirtio_api_core_v1alpha1_ManagedClaimProvisionerList(ref),
+		"kubevirt.io/api/core/v1alpha1.ManagedClaimProvisionerSpec":                                       schema_kubevirtio_api_core_v1alpha1_ManagedClaimProvisionerSpec(ref),
 		"kubevirt.io/api/export/v1.Condition":                                                             schema_kubevirtio_api_export_v1_Condition(ref),
 		"kubevirt.io/api/export/v1.VirtualMachineExport":                                                  schema_kubevirtio_api_export_v1_VirtualMachineExport(ref),
 		"kubevirt.io/api/export/v1.VirtualMachineExportBackup":                                            schema_kubevirtio_api_export_v1_VirtualMachineExportBackup(ref),
@@ -29238,14 +29242,21 @@ func schema_kubevirtio_api_core_v1_VirtualMachineInstanceResourceClaim(ref commo
 					},
 					"resourceClaimName": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ResourceClaimName is the name of a ResourceClaim object in the same namespace as this VMI.\n\nExactly one of ResourceClaimName and ResourceClaimTemplateName must be set.",
+							Description: "ResourceClaimName is the name of a ResourceClaim object in the same namespace as this VMI.\n\nExactly one of ResourceClaimName, ResourceClaimTemplateName, or ManagedClaimProvisionerName must be set.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
 					"resourceClaimTemplateName": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ResourceClaimTemplateName is the name of a ResourceClaimTemplate object in the same namespace as this VMI.\n\nThe template name is passed through to the generated virt-launcher Pod spec. From the Pod spec, the template is used to create a new ResourceClaim, which is bound to the virt-launcher Pod. When the virt-launcher Pod is deleted, the ResourceClaim is also deleted. The generated ResourceClaim name is unique and is recorded in pod.status.resourceClaimStatuses.\n\nExactly one of ResourceClaimName and ResourceClaimTemplateName must be set.",
+							Description: "ResourceClaimTemplateName is the name of a ResourceClaimTemplate object in the same namespace as this VMI.\n\nThe template name is passed through to the generated virt-launcher Pod spec. From the Pod spec, the template is used to create a new ResourceClaim, which is bound to the virt-launcher Pod. When the virt-launcher Pod is deleted, the ResourceClaim is also deleted. The generated ResourceClaim name is unique and is recorded in pod.status.resourceClaimStatuses.\n\nExactly one of ResourceClaimName, ResourceClaimTemplateName, or ManagedClaimProvisionerName must be set.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"managedClaimProvisionerName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ManagedClaimProvisionerName references a cluster-scoped ManagedClaimProvisioner object that controls how the ResourceClaim is generated.\n\nThe managed-claim framework passes the VMI device declarations that reference this entry to the matching provisioner controller, which generates a ResourceClaim named <vmi-name>-<claim-name>. The claim is owned by the VMI and garbage collected with it.\n\nExactly one of ResourceClaimName, ResourceClaimTemplateName, or ManagedClaimProvisionerName must be set.\n\nThis field requires the ManagedDRAClaims feature gate. This feature is in alpha.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -30748,6 +30759,184 @@ func schema_kubevirtio_api_core_v1_WatchdogDevice(ref common.ReferenceCallback) 
 		},
 		Dependencies: []string{
 			"kubevirt.io/api/core/v1.Diag288Watchdog", "kubevirt.io/api/core/v1.I6300ESBWatchdog"},
+	}
+}
+
+func schema_kubevirtio_api_core_v1alpha1_ManagedClaimDeviceType(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name is the VMI device declaration this entry configures: one of cpu, gpu, hostDevice, or network.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"deviceClassName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "DeviceClassName is the DeviceClass used for every request generated for this device type.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"opaque": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Opaque is driver-specific configuration. When set, the provisioner renders a DeviceClaimConfiguration into the generated ResourceClaim.spec.devices.config, with requests set to every generated request for this device type.",
+							Ref:         ref("k8s.io/api/resource/v1.OpaqueDeviceConfiguration"),
+						},
+					},
+				},
+				Required: []string{"name", "deviceClassName"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/api/resource/v1.OpaqueDeviceConfiguration"},
+	}
+}
+
+func schema_kubevirtio_api_core_v1alpha1_ManagedClaimProvisioner(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ManagedClaimProvisioner encodes the DeviceClass mappings and the name of the provisioner controller used to generate a ResourceClaim for a VMI.\n\nAdmins create ManagedClaimProvisioner objects; users reference one by name from vmi.spec.resourceClaims[].managedClaimProvisionerName and declare their devices as usual. The referenced provisioner controller receives every device declaration for the managed claim and assembles the ResourceClaim.\n\nThis resource is in alpha and requires the ManagedDRAClaims feature gate.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta"),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Spec defines the provisioner controller and its DeviceClass mappings.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("kubevirt.io/api/core/v1alpha1.ManagedClaimProvisionerSpec"),
+						},
+					},
+				},
+				Required: []string{"spec"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta", "kubevirt.io/api/core/v1alpha1.ManagedClaimProvisionerSpec"},
+	}
+}
+
+func schema_kubevirtio_api_core_v1alpha1_ManagedClaimProvisionerList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref("k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta"),
+						},
+					},
+					"items": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("kubevirt.io/api/core/v1alpha1.ManagedClaimProvisioner"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"items"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.ListMeta", "kubevirt.io/api/core/v1alpha1.ManagedClaimProvisioner"},
+	}
+}
+
+func schema_kubevirtio_api_core_v1alpha1_ManagedClaimProvisionerSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"provisioner": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Provisioner identifies the controller responsible for claim generation. KubeVirt ships policy.kubevirt.io/aligner, which applies PCIe-root and NUMA topology alignment. Third-party controllers use their own name.\n\nA managed claim is only reconciled once a controller serving this provisioner name is running; until then the launcher pod stays pending.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"deviceTypes": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"name",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "DeviceTypes maps VMI device declarations to DeviceClass names and optional driver-specific configuration.\n\nEach entry's name must be unique and one of cpu, gpu, hostDevice, or network. Every device type referenced by a device in the managed claim must have an entry here.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("kubevirt.io/api/core/v1alpha1.ManagedClaimDeviceType"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"provisioner", "deviceTypes"},
+			},
+		},
+		Dependencies: []string{
+			"kubevirt.io/api/core/v1alpha1.ManagedClaimDeviceType"},
 	}
 }
 

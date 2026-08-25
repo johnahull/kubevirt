@@ -705,7 +705,8 @@ spec:
           port: portValue
         timeoutSeconds: -14
       resourceClaims:
-      - name: nameValue
+      - managedClaimProvisionerName: managedClaimProvisionerNameValue
+        name: nameValue
         resourceClaimName: resourceClaimNameValue
         resourceClaimTemplateName: resourceClaimTemplateNameValue
       schedulerName: schedulerNameValue
