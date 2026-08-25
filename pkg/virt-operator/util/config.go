@@ -54,6 +54,7 @@ const (
 	VirtExportProxyImageEnvName               = "VIRT_EXPORTPROXY_IMAGE"
 	VirtExportServerImageEnvName              = "VIRT_EXPORTSERVER_IMAGE"
 	VirtSynchronizationControllerImageEnvName = "VIRT_SYNCHRONIZATIONCONTROLLER_IMAGE"
+	VirtManagedClaimControllerImageEnvName    = "VIRT_MANAGEDCLAIMCONTROLLER_IMAGE"
 	GsImageEnvName                            = "GS_IMAGE"
 	PrHelperImageEnvName                      = "PR_HELPER_IMAGE"
 	SidecarShimImageEnvName                   = "SIDECAR_SHIM_IMAGE"
@@ -143,6 +144,7 @@ type ComponentImages struct {
 	VirtExportProxyImage               string `json:"virtExportProxyImage,omitempty" optional:"true"`
 	VirtExportServerImage              string `json:"virtExportServerImage,omitempty" optional:"true"`
 	VirtSynchronizationControllerImage string `json:"virtSynchronizationControllerImage,omitempty" optional:"true"`
+	VirtManagedClaimControllerImage    string `json:"virtManagedClaimControllerImage,omitempty" optional:"true"`
 	VirtTemplateApiserverImage         string `json:"virtTemplateApiserverImage,omitempty" optional:"true"`
 	VirtTemplateControllerImage        string `json:"virtTemplateControllerImage,omitempty" optional:"true"`
 	GsImage                            string `json:"GsImage,omitempty" optional:"true"`
@@ -344,13 +346,14 @@ func getConfig(providedRegistry, providedTag, namespace string, additionalProper
 	exportProxyImage := envVarManager.Getenv(VirtExportProxyImageEnvName)
 	exportServerImage := envVarManager.Getenv(VirtExportServerImageEnvName)
 	synchronizationControllerImage := envVarManager.Getenv(VirtSynchronizationControllerImageEnvName)
+	managedClaimControllerImage := envVarManager.Getenv(VirtManagedClaimControllerImageEnvName)
 	virtTemplateApiserverImage := envVarManager.Getenv(VirtTemplateApiserverImageEnvName)
 	virtTemplateControllerImage := envVarManager.Getenv(VirtTemplateControllerImageEnvName)
 	GsImage := envVarManager.Getenv(GsImageEnvName)
 	PrHelperImage := envVarManager.Getenv(PrHelperImageEnvName)
 	SidecarShimImage := envVarManager.Getenv(SidecarShimImageEnvName)
 
-	return newDeploymentConfigWithTag(registry, imagePrefix, tag, namespace, operatorImage, apiImage, controllerImage, handlerImage, launcherImage, exportProxyImage, exportServerImage, synchronizationControllerImage, virtTemplateApiserverImage, virtTemplateControllerImage, GsImage, PrHelperImage, SidecarShimImage, additionalProperties, passthroughEnv)
+	return newDeploymentConfigWithTag(registry, imagePrefix, tag, namespace, operatorImage, apiImage, controllerImage, handlerImage, launcherImage, exportProxyImage, exportServerImage, synchronizationControllerImage, managedClaimControllerImage, virtTemplateApiserverImage, virtTemplateControllerImage, GsImage, PrHelperImage, SidecarShimImage, additionalProperties, passthroughEnv)
 }
 
 func VerifyEnv() error {
@@ -384,7 +387,7 @@ func GetPassthroughEnvWithEnvVarManager(envVarManager EnvVarManager) map[string]
 	return passthroughEnv
 }
 
-func newDeploymentConfigWithTag(registry, imagePrefix, tag, namespace, operatorImage, apiImage, controllerImage, handlerImage, launcherImage, exportProxyImage, exportServerImage, synchronizationControllerImage, virtTemplateApiserverImage, virtTemplateControllerImage, gsImage, prHelperImage, sidecarShimImage string, kvSpec, passthroughEnv map[string]string) *KubeVirtDeploymentConfig {
+func newDeploymentConfigWithTag(registry, imagePrefix, tag, namespace, operatorImage, apiImage, controllerImage, handlerImage, launcherImage, exportProxyImage, exportServerImage, synchronizationControllerImage, managedClaimControllerImage, virtTemplateApiserverImage, virtTemplateControllerImage, gsImage, prHelperImage, sidecarShimImage string, kvSpec, passthroughEnv map[string]string) *KubeVirtDeploymentConfig {
 	c := &KubeVirtDeploymentConfig{
 		Registry:        registry,
 		ImagePrefix:     imagePrefix,
@@ -398,6 +401,7 @@ func newDeploymentConfigWithTag(registry, imagePrefix, tag, namespace, operatorI
 			VirtExportProxyImage:               exportProxyImage,
 			VirtExportServerImage:              exportServerImage,
 			VirtSynchronizationControllerImage: synchronizationControllerImage,
+			VirtManagedClaimControllerImage:    managedClaimControllerImage,
 			VirtTemplateApiserverImage:         virtTemplateApiserverImage,
 			VirtTemplateControllerImage:        virtTemplateControllerImage,
 			GsImage:                            gsImage,
@@ -466,6 +470,14 @@ func (c *KubeVirtDeploymentConfig) GetExportProxyVersion() string {
 
 func (c *KubeVirtDeploymentConfig) GetSynchronizationControllerVersion() string {
 	if digest := DigestFromImageName(c.VirtSynchronizationControllerImage); digest != "" {
+		return digest
+	}
+
+	return c.KubeVirtVersion
+}
+
+func (c *KubeVirtDeploymentConfig) GetManagedClaimControllerVersion() string {
+	if digest := DigestFromImageName(c.VirtManagedClaimControllerImage); digest != "" {
 		return digest
 	}
 

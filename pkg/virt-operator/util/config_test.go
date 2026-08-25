@@ -175,6 +175,7 @@ var _ = Describe("Operator Config", func() {
 			Entry("VirtExportProxyImage", func(c *KubeVirtDeploymentConfig, img string) { c.VirtExportProxyImage = img }),
 			Entry("VirtExportServerImage", func(c *KubeVirtDeploymentConfig, img string) { c.VirtExportServerImage = img }),
 			Entry("VirtSynchronizationControllerImage", func(c *KubeVirtDeploymentConfig, img string) { c.VirtSynchronizationControllerImage = img }),
+			Entry("VirtManagedClaimControllerImage", func(c *KubeVirtDeploymentConfig, img string) { c.VirtManagedClaimControllerImage = img }),
 			Entry("GsImage", func(c *KubeVirtDeploymentConfig, img string) { c.GsImage = img }),
 			Entry("PrHelperImage", func(c *KubeVirtDeploymentConfig, img string) { c.PrHelperImage = img }),
 			Entry("SidecarShimImage", func(c *KubeVirtDeploymentConfig, img string) { c.SidecarShimImage = img }),
@@ -252,6 +253,7 @@ var _ = Describe("Operator Config", func() {
 			virtTemplateApiserverImage := setCustomImageForComponent("virt-template-apiserver")
 			virtTemplateControllerImage := setCustomImageForComponent("virt-template-controller")
 			gsImage := setCustomImageForComponent("gs")
+			managedClaimControllerImage := setCustomImageForComponent("virt-managedclaimcontroller")
 
 			err := VerifyEnv()
 			Expect(err).ToNot(HaveOccurred())
@@ -271,6 +273,7 @@ var _ = Describe("Operator Config", func() {
 			Expect(parsedConfig.VirtTemplateApiserverImage).To(Equal(virtTemplateApiserverImage), errMsg)
 			Expect(parsedConfig.VirtTemplateControllerImage).To(Equal(virtTemplateControllerImage), errMsg)
 			Expect(parsedConfig.GsImage).To(Equal(gsImage), errMsg)
+			Expect(parsedConfig.VirtManagedClaimControllerImage).To(Equal(managedClaimControllerImage), errMsg)
 		})
 
 		type testInput struct {
