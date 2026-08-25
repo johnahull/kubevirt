@@ -140,6 +140,23 @@ var _ = Describe("Install Strategy", func() {
 			Expect(names).To(ConsistOf("virt-managed-claim-controller"))
 		})
 
+		It("install strategy including the managed-claim controller RBAC", func() {
+			strategy, err := GenerateCurrentInstallStrategy(config, "openshift-monitoring", namespace)
+			Expect(err).NotTo(HaveOccurred())
+
+			saNames := make([]string, 0)
+			for _, sa := range strategy.ServiceAccounts() {
+				saNames = append(saNames, sa.Name)
+			}
+			Expect(saNames).To(ContainElement("kubevirt-managed-claim-controller"))
+
+			clusterRoleNames := make([]string, 0)
+			for _, cr := range strategy.ClusterRoles() {
+				clusterRoleNames = append(clusterRoleNames, cr.Name)
+			}
+			Expect(clusterRoleNames).To(ContainElement("kubevirt-managed-claim-controller"))
+		})
+
 		It("install strategy including the ManagedClaimProvisioner CRD", func() {
 			strategy, err := GenerateCurrentInstallStrategy(config, "openshift-monitoring", namespace)
 			Expect(err).NotTo(HaveOccurred())

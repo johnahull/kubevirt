@@ -93,10 +93,13 @@ const (
 
 	// +1 for ContainerPathVolumes webhook (always enabled in tests)
 	// +1 for the ManagedClaimProvisioner CRD (always installed)
-	resourceCount = 97 + virtTemplateResourceCount
+	// +5 for the managed-claim controller RBAC (SA, ClusterRole, ClusterRoleBinding, Role, RoleBinding; always installed)
+	resourceCount = 102 + virtTemplateResourceCount
 	// +1 for the ManagedClaimProvisioner CRD (always patched on update)
-	patchCount  = 65 + virtTemplatePatchCount
-	updateCount = 33 + virtTemplateUpdateCount
+	// +1 for the managed-claim controller ServiceAccount (patched on update)
+	patchCount = 66 + virtTemplatePatchCount
+	// +4 for the managed-claim controller ClusterRole, ClusterRoleBinding, Role, RoleBinding (updated on update)
+	updateCount = 37 + virtTemplateUpdateCount
 
 	// 1 because a temporary validation webhook is created to block new CRDs until api server is deployed
 	expectedTemporaryResources = 1
@@ -1302,6 +1305,7 @@ func (k *KubeVirtTestData) addAllWithExclusionMap(config *util.KubeVirtDeploymen
 	all = append(all, rbac.GetAllController(NAMESPACE, true)...)
 	all = append(all, rbac.GetAllExportProxy(NAMESPACE)...)
 	all = append(all, rbac.GetAllSynchronizationController(NAMESPACE)...)
+	all = append(all, rbac.GetAllManagedClaimController(NAMESPACE)...)
 
 	// crds
 	for _, f := range crdFunctions {
@@ -2798,11 +2802,11 @@ var _ = Describe("KubeVirt Operator", func() {
 
 			Expect(kvTestData.totalAdds).To(Equal(resourceCount - expectedUncreatedResources + expectedTemporaryResources + externalCAConfigMapCount))
 
-			Expect(kvTestData.controller.stores.ServiceAccountCache.List()).To(HaveLen(7))
-			Expect(kvTestData.controller.stores.ClusterRoleCache.List()).To(HaveLen(22))
-			Expect(kvTestData.controller.stores.ClusterRoleBindingCache.List()).To(HaveLen(12))
-			Expect(kvTestData.controller.stores.RoleCache.List()).To(HaveLen(7))
-			Expect(kvTestData.controller.stores.RoleBindingCache.List()).To(HaveLen(8))
+			Expect(kvTestData.controller.stores.ServiceAccountCache.List()).To(HaveLen(8))
+			Expect(kvTestData.controller.stores.ClusterRoleCache.List()).To(HaveLen(23))
+			Expect(kvTestData.controller.stores.ClusterRoleBindingCache.List()).To(HaveLen(13))
+			Expect(kvTestData.controller.stores.RoleCache.List()).To(HaveLen(8))
+			Expect(kvTestData.controller.stores.RoleBindingCache.List()).To(HaveLen(9))
 			Expect(kvTestData.controller.stores.OperatorCrdCache.List()).To(HaveLen(numCRDs))
 			Expect(kvTestData.controller.stores.ServiceCache.List()).To(HaveLen(7))
 			Expect(kvTestData.controller.stores.DeploymentCache.List()).To(HaveLen(1))
@@ -4314,8 +4318,8 @@ var _ = Describe("KubeVirt Operator", func() {
 
 			kvTestData.controller.Execute()
 
-			Expect(kvTestData.controller.stores.RoleCache.List()).To(HaveLen(6))
-			Expect(kvTestData.controller.stores.RoleBindingCache.List()).To(HaveLen(7))
+			Expect(kvTestData.controller.stores.RoleCache.List()).To(HaveLen(7))
+			Expect(kvTestData.controller.stores.RoleBindingCache.List()).To(HaveLen(8))
 			Expect(kvTestData.controller.stores.ServiceMonitorCache.List()).To(BeEmpty())
 		})
 	})
