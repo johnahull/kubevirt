@@ -25,6 +25,7 @@ import (
 
 	backupv1 "kubevirt.io/api/backup/v1alpha1"
 	virtv1 "kubevirt.io/api/core/v1"
+	corev1alpha1 "kubevirt.io/api/core/v1alpha1"
 	exportv1 "kubevirt.io/api/export/v1"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
 	poolv1 "kubevirt.io/api/pool/v1beta1"
@@ -316,6 +317,7 @@ func NewVirtAPIValidatingWebhookConfiguration(installNamespace string) *admissio
 	migrationPolicyCreateValidatePath := MigrationPolicyCreateValidatePath
 	vmCloneCreateValidatePath := VMCloneCreateValidatePath
 	pluginValidatePath := PluginValidatePath
+	managedClaimProvisionerValidatePath := ManagedClaimProvisionerValidatePath
 	failurePolicy := admissionregistrationv1.Fail
 
 	return &admissionregistrationv1.ValidatingWebhookConfiguration{
@@ -930,9 +932,36 @@ func NewVirtAPIValidatingWebhookConfiguration(installNamespace string) *admissio
 					},
 				},
 			},
+			{
+				Name:                    "managed-claim-provisioner-validator.kubevirt.io",
+				AdmissionReviewVersions: []string{"v1"},
+				FailurePolicy:           &failurePolicy,
+				TimeoutSeconds:          &defaultTimeoutSeconds,
+				SideEffects:             &sideEffectNone,
+				Rules: []admissionregistrationv1.RuleWithOperations{{
+					Operations: []admissionregistrationv1.OperationType{
+						admissionregistrationv1.Create,
+						admissionregistrationv1.Update,
+					},
+					Rule: admissionregistrationv1.Rule{
+						APIGroups:   []string{core.GroupName},
+						APIVersions: []string{corev1alpha1.SchemeGroupVersion.Version},
+						Resources:   []string{corev1alpha1.ResourceManagedClaimProvisioners},
+					},
+				}},
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Namespace: installNamespace,
+						Name:      VirtApiServiceName,
+						Path:      &managedClaimProvisionerValidatePath,
+					},
+				},
+			},
 		},
 	}
 }
+
+const ManagedClaimProvisionerValidatePath = "/managedclaimprovisioner-validate"
 
 const KubeVirtUpdateValidatePath = "/kubevirt-validate-update"
 

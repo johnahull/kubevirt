@@ -1061,6 +1061,9 @@ func (app *virtAPIApp) registerValidatingWebhooks(informers *webhooks.Informers)
 	http.HandleFunc(components.PluginValidatePath, func(w http.ResponseWriter, r *http.Request) {
 		validating_webhook.ServePlugins(w, r, app.clusterConfig)
 	})
+	http.HandleFunc(components.ManagedClaimProvisionerValidatePath, func(w http.ResponseWriter, r *http.Request) {
+		validating_webhook.ServeManagedClaimProvisioner(w, r, app.clusterConfig)
+	})
 }
 
 func (app *virtAPIApp) registerMutatingWebhook(informers *webhooks.Informers) {
