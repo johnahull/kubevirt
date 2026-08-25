@@ -4,6 +4,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	v1 "k8s.io/api/admissionregistration/v1"
+
+	"kubevirt.io/api/core"
+	corev1alpha1 "kubevirt.io/api/core/v1alpha1"
 )
 
 var _ = Describe("Webhooks", func() {
@@ -45,5 +48,26 @@ var _ = Describe("Webhooks", func() {
 		for _, webhook := range configuration.Webhooks {
 			Expect(*webhook.FailurePolicy).To(Equal(v1.Fail))
 		}
+	})
+
+	It("should register the managed-claim-provisioner validating webhook", func() {
+		configuration := NewVirtAPIValidatingWebhookConfiguration("testnamespace")
+
+		var found *v1.ValidatingWebhook
+		for i := range configuration.Webhooks {
+			if configuration.Webhooks[i].Name == "managed-claim-provisioner-validator.kubevirt.io" {
+				found = &configuration.Webhooks[i]
+				break
+			}
+		}
+		Expect(found).ToNot(BeNil())
+
+		Expect(found.Rules).To(HaveLen(1))
+		rule := found.Rules[0]
+		Expect(rule.Operations).To(ConsistOf(v1.Create, v1.Update))
+		Expect(rule.APIGroups).To(ConsistOf(core.GroupName))
+		Expect(rule.APIVersions).To(ConsistOf(corev1alpha1.SchemeGroupVersion.Version))
+		Expect(rule.Resources).To(ConsistOf(corev1alpha1.ResourceManagedClaimProvisioners))
+		Expect(*found.ClientConfig.Service.Path).To(Equal(ManagedClaimProvisionerValidatePath))
 	})
 })
