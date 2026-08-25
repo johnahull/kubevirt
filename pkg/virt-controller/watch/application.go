@@ -189,6 +189,8 @@ type VirtControllerApp struct {
 	cdiInformer            cache.SharedIndexInformer
 	cdiConfigInformer      cache.SharedIndexInformer
 
+	resourceClaimInformer cache.SharedIndexInformer
+
 	migrationController *migration.Controller
 	migrationInformer   cache.SharedIndexInformer
 
@@ -419,6 +421,7 @@ func Execute() {
 	app.allPodInformer = app.informerFactory.Pod()
 	app.exportServiceInformer = app.informerFactory.ExportService()
 	app.resourceQuotaInformer = app.informerFactory.ResourceQuota()
+	app.resourceClaimInformer = app.informerFactory.ResourceClaim()
 
 	if app.hasCDI {
 		app.dataVolumeInformer = app.informerFactory.DataVolume()
@@ -737,6 +740,7 @@ func (vca *VirtControllerApp) initCommon() {
 		vca.cdiInformer,
 		vca.cdiConfigInformer,
 		vca.kubeVirtInformer,
+		vca.resourceClaimInformer,
 		vca.clusterConfig,
 		topologyHinter,
 		netAnnotationsGenerator,

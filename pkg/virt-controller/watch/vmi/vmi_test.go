@@ -36,6 +36,7 @@ import (
 	"kubevirt.io/kubevirt/tests/framework/matcher"
 
 	k8sv1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -62,6 +63,7 @@ import (
 
 	kvcontroller "kubevirt.io/kubevirt/pkg/controller"
 	controllertesting "kubevirt.io/kubevirt/pkg/controller/testing"
+	"kubevirt.io/kubevirt/pkg/dra"
 	"kubevirt.io/kubevirt/pkg/pointer"
 	"kubevirt.io/kubevirt/pkg/storage/cbt"
 	storageannotations "kubevirt.io/kubevirt/pkg/storage/pod/annotations"
@@ -221,6 +223,7 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 		cdiInformer, _ := testutils.NewFakeInformerFor(&cdiv1.CDIConfig{})
 		cdiConfigInformer, _ := testutils.NewFakeInformerFor(&cdiv1.CDIConfig{})
 		kubeVirtInformer, _ := testutils.NewFakeInformerFor(&virtv1.KubeVirt{})
+		resourceClaimInformer, _ := testutils.NewFakeInformerFor(&resourcev1.ResourceClaim{})
 		rqInformer, _ := testutils.NewFakeInformerFor(&k8sv1.ResourceQuota{})
 		nsInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Namespace{})
 		var qemuGid int64 = 107
@@ -245,6 +248,7 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			cdiInformer,
 			cdiConfigInformer,
 			kubeVirtInformer,
+			resourceClaimInformer,
 			config,
 			topology.NewTopologyHinter(&cache.FakeCustomStore{}, &cache.FakeCustomStore{}, config),
 			stubNetworkAnnotationsGenerator{},
@@ -264,6 +268,7 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			controllertesting.SanityExecute(controller, []cache.Store{
 				controller.vmiIndexer, controller.vmStore, controller.podIndexer, controller.pvcIndexer,
 				controller.dataVolumeIndexer, controller.cdiStore, controller.cdiConfigStore,
+				controller.resourceClaimIndexer,
 				storageProfileInformer.GetStore(),
 				storageClassStore,
 			}, Default)
@@ -306,6 +311,118 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 	addDataVolume := func(dv *cdiv1.DataVolume) {
 		Expect(controller.dataVolumeIndexer.Add(dv)).To(Succeed())
 	}
+
+	Context("when a managed ResourceClaim changes", func() {
+		ownedClaim := func(vmi *virtv1.VirtualMachineInstance, entryName string) *resourcev1.ResourceClaim {
+			return &resourcev1.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            dra.ManagedClaimName(vmi.Name, entryName),
+					Namespace:       vmi.Namespace,
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(vmi, virtv1.VirtualMachineInstanceGroupVersionKind)},
+				},
+			}
+		}
+
+		It("enqueues the owning VMI when the ResourceClaim is added", func() {
+			vmi := newPendingVirtualMachine("testvmi")
+			Expect(controller.vmiIndexer.Add(vmi)).To(Succeed())
+
+			controller.addResourceClaim(ownedClaim(vmi, "gpu"))
+
+			Expect(controller.Queue.Len()).To(Equal(1))
+			key, _ := controller.Queue.Get()
+			Expect(key).To(Equal(vmi.Namespace + "/" + vmi.Name))
+		})
+
+		It("enqueues the owning VMI when the ResourceClaim is updated", func() {
+			vmi := newPendingVirtualMachine("testvmi")
+			Expect(controller.vmiIndexer.Add(vmi)).To(Succeed())
+
+			oldClaim := ownedClaim(vmi, "gpu")
+			curClaim := ownedClaim(vmi, "gpu")
+			curClaim.ResourceVersion = "2"
+			controller.updateResourceClaim(oldClaim, curClaim)
+
+			Expect(controller.Queue.Len()).To(Equal(1))
+			key, _ := controller.Queue.Get()
+			Expect(key).To(Equal(vmi.Namespace + "/" + vmi.Name))
+		})
+
+		It("enqueues the owning VMI when the ResourceClaim is deleted", func() {
+			vmi := newPendingVirtualMachine("testvmi")
+			Expect(controller.vmiIndexer.Add(vmi)).To(Succeed())
+
+			controller.deleteResourceClaim(ownedClaim(vmi, "gpu"))
+
+			Expect(controller.Queue.Len()).To(Equal(1))
+			key, _ := controller.Queue.Get()
+			Expect(key).To(Equal(vmi.Namespace + "/" + vmi.Name))
+		})
+
+		It("enqueues the owning VMI when the ResourceClaim delete arrives as a tombstone", func() {
+			vmi := newPendingVirtualMachine("testvmi")
+			Expect(controller.vmiIndexer.Add(vmi)).To(Succeed())
+
+			claim := ownedClaim(vmi, "gpu")
+			tombstone := cache.DeletedFinalStateUnknown{Key: claim.Namespace + "/" + claim.Name, Obj: claim}
+			controller.deleteResourceClaim(tombstone)
+
+			Expect(controller.Queue.Len()).To(Equal(1))
+			key, _ := controller.Queue.Get()
+			Expect(key).To(Equal(vmi.Namespace + "/" + vmi.Name))
+		})
+
+		It("ignores a ResourceClaim that is not owned by a VMI", func() {
+			claim := &resourcev1.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "unowned", Namespace: k8sv1.NamespaceDefault},
+			}
+
+			controller.addResourceClaim(claim)
+
+			Expect(controller.Queue.Len()).To(Equal(0))
+		})
+	})
+
+	Context("listing managed ResourceClaims for a VMI", func() {
+		ownedClaim := func(vmi *virtv1.VirtualMachineInstance, entryName string) *resourcev1.ResourceClaim {
+			return &resourcev1.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            dra.ManagedClaimName(vmi.Name, entryName),
+					Namespace:       vmi.Namespace,
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(vmi, virtv1.VirtualMachineInstanceGroupVersionKind)},
+				},
+			}
+		}
+
+		It("returns only the ResourceClaims the VMI owns in its namespace", func() {
+			vmi := newPendingVirtualMachine("testvmi")
+
+			mine := ownedClaim(vmi, "gpu")
+
+			otherVMI := newPendingVirtualMachine("othervmi")
+			otherVMI.UID = "9999"
+			theirs := ownedClaim(otherVMI, "gpu")
+
+			unowned := &resourcev1.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "unowned", Namespace: vmi.Namespace},
+			}
+
+			Expect(controller.resourceClaimIndexer.Add(mine)).To(Succeed())
+			Expect(controller.resourceClaimIndexer.Add(theirs)).To(Succeed())
+			Expect(controller.resourceClaimIndexer.Add(unowned)).To(Succeed())
+
+			claims := controller.listManagedResourceClaimsForVMI(vmi)
+
+			Expect(claims).To(HaveLen(1))
+			Expect(claims[0].Name).To(Equal(mine.Name))
+		})
+
+		It("returns nothing when the VMI owns no ResourceClaims", func() {
+			vmi := newPendingVirtualMachine("testvmi")
+
+			Expect(controller.listManagedResourceClaimsForVMI(vmi)).To(BeEmpty())
+		})
+	})
 
 	Describe("recovering a VMI from pod owner annotations", func() {
 		It("should recover the VMI when the annotated owner identity matches", func() {

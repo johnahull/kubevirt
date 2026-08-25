@@ -66,6 +66,7 @@ func NewController(templateService templateService,
 	cdiInformer cache.SharedIndexInformer,
 	cdiConfigInformer cache.SharedIndexInformer,
 	kubeVirtInformer cache.SharedIndexInformer,
+	resourceClaimInformer cache.SharedIndexInformer,
 	clusterConfig *virtconfig.ClusterConfig,
 	topologyHinter topology.Hinter,
 	netAnnotationsGenerator annotationsGenerator,
@@ -95,6 +96,7 @@ func NewController(templateService templateService,
 		vmiExpectations:                   controller.NewUIDTrackingControllerExpectations(controller.NewControllerExpectations()),
 		pvcExpectations:                   controller.NewUIDTrackingControllerExpectations(controller.NewControllerExpectations()),
 		dataVolumeIndexer:                 dataVolumeInformer.GetIndexer(),
+		resourceClaimIndexer:              resourceClaimInformer.GetIndexer(),
 		cdiStore:                          cdiInformer.GetStore(),
 		cdiConfigStore:                    cdiConfigInformer.GetStore(),
 		clusterConfig:                     clusterConfig,
@@ -114,7 +116,7 @@ func NewController(templateService templateService,
 		return vmInformer.HasSynced() && vmiInformer.HasSynced() && podInformer.HasSynced() &&
 			dataVolumeInformer.HasSynced() && cdiConfigInformer.HasSynced() && cdiInformer.HasSynced() &&
 			pvcInformer.HasSynced() && storageClassInformer.HasSynced() && storageProfileInformer.HasSynced() &&
-			kubeVirtInformer.HasSynced()
+			kubeVirtInformer.HasSynced() && resourceClaimInformer.HasSynced()
 	}
 
 	_, err := vmiInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -154,6 +156,15 @@ func NewController(templateService templateService,
 
 	_, err = kubeVirtInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		UpdateFunc: c.updateKubeVirt,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = resourceClaimInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    c.addResourceClaim,
+		DeleteFunc: c.deleteResourceClaim,
+		UpdateFunc: c.updateResourceClaim,
 	})
 	if err != nil {
 		return nil, err
@@ -231,6 +242,7 @@ type Controller struct {
 	vmiExpectations                   *controller.UIDTrackingControllerExpectations
 	pvcExpectations                   *controller.UIDTrackingControllerExpectations
 	dataVolumeIndexer                 cache.Indexer
+	resourceClaimIndexer              cache.Indexer
 	cdiStore                          cache.Store
 	cdiConfigStore                    cache.Store
 	clusterConfig                     *virtconfig.ClusterConfig
