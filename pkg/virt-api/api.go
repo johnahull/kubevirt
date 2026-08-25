@@ -58,6 +58,7 @@ import (
 
 	"kubevirt.io/kubevirt/pkg/certificates/bootstrap"
 	"kubevirt.io/kubevirt/pkg/controller"
+	draadmitter "kubevirt.io/kubevirt/pkg/dra/admitter"
 	"kubevirt.io/kubevirt/pkg/healthz"
 	clientmetrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/common/client"
 	metrics "kubevirt.io/kubevirt/pkg/monitoring/metrics/virt-api"
@@ -74,6 +75,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	mutating_webhook "kubevirt.io/kubevirt/pkg/virt-api/webhooks/mutating-webhook"
 	validating_webhook "kubevirt.io/kubevirt/pkg/virt-api/webhooks/validating-webhook"
+	"kubevirt.io/kubevirt/pkg/virt-api/webhooks/validating-webhook/admitters"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 	virtoperatorutils "kubevirt.io/kubevirt/pkg/virt-operator/util"
@@ -996,6 +998,13 @@ func (app *virtAPIApp) registerValidatingWebhooks(informers *webhooks.Informers)
 			},
 			// SIG-Storage
 			storageadmitters.Validate,
+			// Managed DRA claims: reject a reference to a ManagedClaimProvisioner
+			// that does not exist, so a typo surfaces at VMI creation rather than
+			// leaving the launcher pod pending with nothing to serve it.
+			func(field *field.Path, spec *v1.VirtualMachineInstanceSpec, _ *virtconfig.ClusterConfig) []metav1.StatusCause {
+				return draadmitter.ValidateProvisionerExists(field, spec,
+					admitters.NewManagedClaimProvisionerGetter(informers.ManagedClaimProvisionerInformer))
+			},
 		)
 	})
 	http.HandleFunc(components.VMIUpdateValidatePath, func(w http.ResponseWriter, r *http.Request) {
@@ -1220,6 +1229,7 @@ func (app *virtAPIApp) Run() {
 	vmRestoreInformer := kubeInformerFactory.VirtualMachineRestore()
 	vmBackupInformer := kubeInformerFactory.VirtualMachineBackup()
 	namespaceInformer := kubeInformerFactory.Namespace()
+	managedClaimProvisionerInformer := kubeInformerFactory.ManagedClaimProvisioner()
 
 	stopChan := make(chan struct{}, 1)
 	defer close(stopChan)
@@ -1254,11 +1264,12 @@ func (app *virtAPIApp) Run() {
 	kubeInformerFactory.WaitForCacheSync(stopChan)
 
 	webhookInformers := &webhooks.Informers{
-		VMIPresetInformer:  vmiPresetInformer,
-		VMRestoreInformer:  vmRestoreInformer,
-		VMBackupInformer:   vmBackupInformer,
-		DataSourceInformer: dataSourceInformer,
-		NamespaceInformer:  namespaceInformer,
+		VMIPresetInformer:               vmiPresetInformer,
+		VMRestoreInformer:               vmRestoreInformer,
+		VMBackupInformer:                vmBackupInformer,
+		DataSourceInformer:              dataSourceInformer,
+		NamespaceInformer:               namespaceInformer,
+		ManagedClaimProvisionerInformer: managedClaimProvisionerInformer,
 	}
 
 	// Build webhook subresources
