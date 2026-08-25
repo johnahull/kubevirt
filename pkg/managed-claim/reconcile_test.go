@@ -172,6 +172,17 @@ var _ = Describe("Reconciler", func() {
 			Expect(claim.Labels).To(HaveKeyWithValue(ManagedClaimVMILabel, "gpu-vm"))
 		})
 
+		It("should protect the created claim with a finalizer", func() {
+			// An external delete must not tear the claim out from under a
+			// running VMI; the finalizer keeps the object present until this
+			// controller releases it during VMI teardown.
+			Expect(reconciler.Reconcile(context.Background(), vmi)).To(Succeed())
+
+			claim, err := getClaim()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(claim.Finalizers).To(ContainElement(ManagedClaimFinalizer))
+		})
+
 		It("should skip entries that are not managed", func() {
 			vmi.Spec.ResourceClaims = []v1.VirtualMachineInstanceResourceClaim{
 				{Name: "direct", ResourceClaimName: pointer.P("some-claim")},
@@ -245,6 +256,25 @@ var _ = Describe("Reconciler", func() {
 			Expect(claim.Spec.Devices.Requests[0].Exactly.DeviceClassName).To(Equal("gpu.example.com"))
 		})
 
+		It("should restore its finalizer if an existing claim is missing it", func() {
+			// A claim created before this feature, or one whose finalizer was
+			// stripped, must be protected again on the next reconcile.
+			Expect(reconciler.Reconcile(context.Background(), vmi)).To(Succeed())
+
+			claim, err := getClaim()
+			Expect(err).ToNot(HaveOccurred())
+			claim.Finalizers = nil
+			_, err = client.ResourceV1().ResourceClaims(vmiNamespace).
+				Update(context.Background(), claim, metav1.UpdateOptions{})
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(reconciler.Reconcile(context.Background(), vmi)).To(Succeed())
+
+			claim, err = getClaim()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(claim.Finalizers).To(ContainElement(ManagedClaimFinalizer))
+		})
+
 		It("should re-create a claim deleted out of band", func() {
 			Expect(reconciler.Reconcile(context.Background(), vmi)).To(Succeed())
 			Expect(client.ResourceV1().ResourceClaims(vmiNamespace).
@@ -254,6 +284,57 @@ var _ = Describe("Reconciler", func() {
 
 			_, err := getClaim()
 			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+
+	Context("releasing", func() {
+		It("should release its finalizer from managed claims when the VMI is being deleted", func() {
+			// Without releasing the finalizer, owner-reference GC could never
+			// remove the claim and VMI deletion would wedge forever.
+			Expect(reconciler.Reconcile(context.Background(), vmi)).To(Succeed())
+
+			now := metav1.Now()
+			vmi.DeletionTimestamp = &now
+			Expect(reconciler.Reconcile(context.Background(), vmi)).To(Succeed())
+
+			claim, err := getClaim()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(claim.Finalizers).ToNot(ContainElement(ManagedClaimFinalizer))
+		})
+
+		It("should release its finalizer from a claim deleted externally while the VMI runs", func() {
+			// An external delete leaves the claim terminating (the finalizer
+			// holds it in the API server). The controller must release the
+			// finalizer so GC finishes; a later reconcile recreates it.
+			now := metav1.Now()
+			terminating := &resourcev1.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              derivedName,
+					Namespace:         vmiNamespace,
+					DeletionTimestamp: &now,
+					Finalizers:        []string{ManagedClaimFinalizer},
+				},
+			}
+			Expect(client.Tracker().Add(terminating)).To(Succeed())
+
+			Expect(reconciler.Reconcile(context.Background(), vmi)).To(Succeed())
+
+			claim, err := getClaim()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(claim.Finalizers).ToNot(ContainElement(ManagedClaimFinalizer))
+		})
+
+		It("should not touch claims served by a different provisioner during teardown", func() {
+			Expect(reconciler.Reconcile(context.Background(), vmi)).To(Succeed())
+			store.known["gpu-default"].Spec.Provisioner = "vendor.example.com/other"
+
+			now := metav1.Now()
+			vmi.DeletionTimestamp = &now
+			Expect(reconciler.Reconcile(context.Background(), vmi)).To(Succeed())
+
+			claim, err := getClaim()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(claim.Finalizers).To(ContainElement(ManagedClaimFinalizer))
 		})
 	})
 
