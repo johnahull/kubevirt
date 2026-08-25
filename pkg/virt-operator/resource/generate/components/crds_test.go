@@ -17,6 +17,7 @@ import (
 	backupv1alpha1 "kubevirt.io/api/backup/v1alpha1"
 	clonev1beta1 "kubevirt.io/api/clone/v1beta1"
 	v1 "kubevirt.io/api/core/v1"
+	corev1alpha1 "kubevirt.io/api/core/v1alpha1"
 	exportv1 "kubevirt.io/api/export/v1"
 	poolv1 "kubevirt.io/api/pool/v1beta1"
 	snapshotv1beta1 "kubevirt.io/api/snapshot/v1beta1"
@@ -53,7 +54,21 @@ var _ = Describe("CRDs", func() {
 		Entry("for MigrationPolicy", NewMigrationPolicyCrd),
 		Entry("for VirtualMachineBackup", NewVirtualMachineBackupCrd),
 		Entry("for VirtualMachineBackupTracker", NewVirtualMachineBackupTrackerCrd),
+		Entry("for ManagedClaimProvisioner", NewManagedClaimProvisionerCrd),
 	)
+
+	It("ManagedClaimProvisioner CRD should be cluster scoped with the expected names", func() {
+		crd, err := NewManagedClaimProvisionerCrd()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(crd.Name).To(Equal("managedclaimprovisioners." + corev1alpha1.SchemeGroupVersion.Group))
+		Expect(crd.Spec.Scope).To(Equal(extv1.ClusterScoped))
+		Expect(crd.Spec.Group).To(Equal(corev1alpha1.SchemeGroupVersion.Group))
+		Expect(crd.Spec.Names.Kind).To(Equal(corev1alpha1.ManagedClaimProvisionerKind))
+		Expect(crd.Spec.Names.Plural).To(Equal(corev1alpha1.ResourceManagedClaimProvisioners))
+		Expect(crd.Spec.Names.Singular).To(Equal(corev1alpha1.ResourceManagedClaimProvisioner))
+		Expect(crd.Spec.Versions).To(HaveLen(1))
+		Expect(crd.Spec.Versions[0].Name).To(Equal(corev1alpha1.SchemeGroupVersion.Version))
+	})
 
 	It("DataVolumeTemplates should have nullable a XPreserveUnknownFields on metadata", func() {
 		crd, err := NewVirtualMachineCrd()

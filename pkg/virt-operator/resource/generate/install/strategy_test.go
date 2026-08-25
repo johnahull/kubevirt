@@ -38,6 +38,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1 "kubevirt.io/api/core/v1"
+	corev1alpha1 "kubevirt.io/api/core/v1alpha1"
 
 	"kubevirt.io/kubevirt/pkg/pointer"
 	//"kubevirt.io/kubevirt/pkg/virt-operator/resource/apply"
@@ -128,6 +129,17 @@ var _ = Describe("Install Strategy", func() {
 			}
 
 		})
+		It("install strategy including the ManagedClaimProvisioner CRD", func() {
+			strategy, err := GenerateCurrentInstallStrategy(config, "openshift-monitoring", namespace)
+			Expect(err).NotTo(HaveOccurred())
+
+			names := make([]string, 0, len(strategy.CRDs()))
+			for _, crd := range strategy.CRDs() {
+				names = append(names, crd.Name)
+			}
+			Expect(names).To(ContainElement("managedclaimprovisioners." + corev1alpha1.SchemeGroupVersion.Group))
+		})
+
 		It("latest install strategy with lossless byte conversion.", func() {
 			strategy, err := GenerateCurrentInstallStrategy(config, "openshift-monitoring", namespace)
 			Expect(err).ToNot(HaveOccurred())
