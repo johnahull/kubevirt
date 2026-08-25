@@ -201,6 +201,18 @@ func haveSynchronizationControllerDeploymentsRolledOver(targetStrategy install.S
 	return true
 }
 
+func haveManagedClaimControllerDeploymentsRolledOver(targetStrategy install.StrategyInterface, kv *v1.KubeVirt, stores util.Stores) bool {
+	for _, deployment := range targetStrategy.ManagedClaimControllerDeployments() {
+		if !util.DeploymentIsReady(kv, deployment, stores) {
+			log.Log.V(2).Infof("Waiting on deployment %v to roll over to latest version", deployment.GetName())
+			// not rolled out yet
+			return false
+		}
+	}
+
+	return true
+}
+
 func haveVirtTemplateDeploymentsRolledOver(targetStrategy install.StrategyInterface, kv *v1.KubeVirt, stores util.Stores) bool {
 	for _, deployment := range targetStrategy.VirtTemplateDeployments() {
 		if !util.DeploymentIsReady(kv, deployment, stores) {
@@ -397,6 +409,8 @@ func (r *Reconciler) Sync(queue workqueue.TypedRateLimitingInterface[string]) (b
 	exportProxyDeploymentsRolledOver := haveExportProxyDeploymentsRolledOver(r.targetStrategy, r.kv, r.stores)
 	synchronizationControllerEnabled := r.isFeatureGateEnabled(featuregate.DecentralizedLiveMigration)
 	synchronizationControllerDeploymentRolledOver := !synchronizationControllerEnabled || haveSynchronizationControllerDeploymentsRolledOver(r.targetStrategy, r.kv, r.stores)
+	managedClaimControllerEnabled := r.isFeatureGateEnabled(featuregate.ManagedDRAClaimsGate)
+	managedClaimControllerDeploymentRolledOver := !managedClaimControllerEnabled || haveManagedClaimControllerDeploymentsRolledOver(r.targetStrategy, r.kv, r.stores)
 	virtTemplateDeploymentEnabled := r.virtTemplateDeploymentEnabled()
 	virtTemplateDeploymentsRolledOver := !virtTemplateDeploymentEnabled || haveVirtTemplateDeploymentsRolledOver(r.targetStrategy, r.kv, r.stores)
 
@@ -405,7 +419,8 @@ func (r *Reconciler) Sync(queue workqueue.TypedRateLimitingInterface[string]) (b
 	infrastructureRolledOver := false
 	if apiDeploymentsRolledOver && controllerDeploymentsRolledOver &&
 		exportProxyDeploymentsRolledOver && daemonSetsRolledOver &&
-		synchronizationControllerDeploymentRolledOver && virtTemplateDeploymentsRolledOver {
+		synchronizationControllerDeploymentRolledOver && managedClaimControllerDeploymentRolledOver &&
+		virtTemplateDeploymentsRolledOver {
 		// infrastructure has rolled over and is available
 		infrastructureRolledOver = true
 	} else if (targetVersion == observedVersion) && (targetImageRegistry == observedImageRegistry) &&
@@ -614,6 +629,22 @@ func (r *Reconciler) createOrRollBackSystem(apiDeploymentsRolledOver bool) (bool
 	// create/update Synchronization controller Deployments
 	for _, deployment := range r.targetStrategy.SynchronizationControllerDeployments() {
 		if r.isFeatureGateEnabled(featuregate.DecentralizedLiveMigration) {
+			deployment, err := r.syncDeployment(deployment)
+			if err != nil {
+				return false, err
+			}
+			err = r.syncPodDisruptionBudgetForDeployment(deployment)
+			if err != nil {
+				return false, err
+			}
+		} else if err := r.deleteDeployment(deployment); err != nil {
+			return false, err
+		}
+	}
+
+	// create/update managed-claim controller Deployments
+	for _, deployment := range r.targetStrategy.ManagedClaimControllerDeployments() {
+		if r.isFeatureGateEnabled(featuregate.ManagedDRAClaimsGate) {
 			deployment, err := r.syncDeployment(deployment)
 			if err != nil {
 				return false, err
