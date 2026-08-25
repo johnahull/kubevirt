@@ -129,6 +129,17 @@ var _ = Describe("Install Strategy", func() {
 			}
 
 		})
+		It("install strategy exposing the managed-claim controller deployment", func() {
+			strategy, err := GenerateCurrentInstallStrategy(config, "openshift-monitoring", namespace)
+			Expect(err).NotTo(HaveOccurred())
+
+			names := make([]string, 0)
+			for _, deployment := range strategy.ManagedClaimControllerDeployments() {
+				names = append(names, deployment.Name)
+			}
+			Expect(names).To(ConsistOf("virt-managed-claim-controller"))
+		})
+
 		It("install strategy including the ManagedClaimProvisioner CRD", func() {
 			strategy, err := GenerateCurrentInstallStrategy(config, "openshift-monitoring", namespace)
 			Expect(err).NotTo(HaveOccurred())
