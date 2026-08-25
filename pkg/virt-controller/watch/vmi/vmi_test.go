@@ -70,6 +70,7 @@ import (
 	storagetypes "kubevirt.io/kubevirt/pkg/storage/types"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/common"
 	watchtesting "kubevirt.io/kubevirt/pkg/virt-controller/watch/testing"
@@ -421,6 +422,65 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			vmi := newPendingVirtualMachine("testvmi")
 
 			Expect(controller.listManagedResourceClaimsForVMI(vmi)).To(BeEmpty())
+		})
+	})
+
+	Context("aggregating managed ResourceClaim readiness in updateStatus", func() {
+		ownedAllocatedClaim := func(vmi *virtv1.VirtualMachineInstance, entryName string) *resourcev1.ResourceClaim {
+			return &resourcev1.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            dra.ManagedClaimName(vmi.Name, entryName),
+					Namespace:       vmi.Namespace,
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(vmi, virtv1.VirtualMachineInstanceGroupVersionKind)},
+				},
+				Status: resourcev1.ResourceClaimStatus{Allocation: &resourcev1.AllocationResult{}},
+			}
+		}
+
+		vmiWithManagedClaim := func() *virtv1.VirtualMachineInstance {
+			vmi := newPendingVirtualMachine("testvmi")
+			vmi.Spec.ResourceClaims = []virtv1.VirtualMachineInstanceResourceClaim{
+				{Name: "gpu", ManagedClaimProvisionerName: pointer.P("pcie-aligned")},
+			}
+			return vmi
+		}
+
+		enableManagedDRAClaims := func() {
+			kvCR := testutils.GetFakeKubeVirtClusterConfig(kvStore)
+			if kvCR.Spec.Configuration.DeveloperConfiguration == nil {
+				kvCR.Spec.Configuration.DeveloperConfiguration = &virtv1.DeveloperConfiguration{}
+			}
+			kvCR.Spec.Configuration.DeveloperConfiguration.FeatureGates = append(
+				kvCR.Spec.Configuration.DeveloperConfiguration.FeatureGates, featuregate.ManagedDRAClaimsGate)
+			testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kvCR)
+		}
+
+		It("sets ManagedClaimsReady to True when the gate is on and every claim is allocated", func() {
+			enableManagedDRAClaims()
+			vmi := vmiWithManagedClaim()
+			addVirtualMachine(vmi)
+			Expect(controller.resourceClaimIndexer.Add(ownedAllocatedClaim(vmi, "gpu"))).To(Succeed())
+
+			Expect(controller.updateStatus(vmi, nil, nil, nil)).To(Succeed())
+
+			expectVMIWithMatcherConditions(vmi.Namespace, vmi.Name, ContainElement(MatchFields(IgnoreExtras, Fields{
+				"Type":   BeEquivalentTo(virtv1.VirtualMachineInstanceManagedClaimsReady),
+				"Status": BeEquivalentTo(k8sv1.ConditionTrue),
+			})))
+		})
+
+		It("does not add the condition when the gate is off", func() {
+			vmi := vmiWithManagedClaim()
+			addVirtualMachine(vmi)
+			Expect(controller.resourceClaimIndexer.Add(ownedAllocatedClaim(vmi, "gpu"))).To(Succeed())
+
+			Expect(controller.updateStatus(vmi, nil, nil, nil)).To(Succeed())
+
+			updatedVMI, err := virtClientset.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updatedVMI.Status.Conditions).ToNot(ContainElement(MatchFields(IgnoreExtras, Fields{
+				"Type": BeEquivalentTo(virtv1.VirtualMachineInstanceManagedClaimsReady),
+			})))
 		})
 	})
 
