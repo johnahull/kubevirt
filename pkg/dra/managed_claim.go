@@ -33,15 +33,23 @@ const (
 	maxManagedClaimNameLen = 253
 	// managedClaimHashLen is the number of hex characters of the name digest
 	// appended when the name has to be truncated.
-	managedClaimHashLen = 8
+	managedClaimHashLen = 5
+	// managedClaimComponentLen bounds how many characters of the VMI name and
+	// the claim name each keep when the joined name has to be truncated, so
+	// both stay recognizable. The two separators and the hash are reserved
+	// from the budget and the remainder is split evenly:
+	// 253 - managedClaimHashLen - 2 == 246, /2 == 123 per component.
+	managedClaimComponentLen = (maxManagedClaimNameLen - managedClaimHashLen - 2) / 2
 )
 
 // ManagedClaimName returns the deterministic name of the ResourceClaim
 // generated for a managed claim entry: <vmiName>-<claimName>.
 //
-// When that exceeds the DNS subdomain limit, the name is truncated and a
-// SHA-256 digest of the full untruncated name is appended, so that two VMIs
-// sharing a long prefix do not collide onto the same ResourceClaim.
+// When that exceeds the DNS subdomain limit, a fixed-length prefix of both
+// the VMI name and the claim name is kept and a SHA-256 digest of the full
+// untruncated name is appended. Keeping a prefix of both names leaves each
+// recognizable even when one is long, and the digest keeps two VMIs sharing
+// a long prefix from colliding onto the same ResourceClaim.
 //
 // This name is a contract between two independently-rolled binaries:
 // virt-controller renders it into the launcher pod's resourceClaims entry,
@@ -58,7 +66,19 @@ func ManagedClaimName(vmiName, claimName string) string {
 	_, _ = io.WriteString(hash, name)
 	digest := fmt.Sprintf("%x", hash.Sum(nil))[:managedClaimHashLen]
 
-	return fmt.Sprintf("%s-%s", name[:maxManagedClaimNameLen-managedClaimHashLen-1], digest)
+	return fmt.Sprintf("%s-%s-%s",
+		truncateComponent(vmiName),
+		truncateComponent(claimName),
+		digest)
+}
+
+// truncateComponent keeps at most managedClaimComponentLen characters of a
+// name component used to build a truncated ManagedClaimName.
+func truncateComponent(s string) string {
+	if len(s) <= managedClaimComponentLen {
+		return s
+	}
+	return s[:managedClaimComponentLen]
 }
 
 // IsManagedClaim reports whether a VMI resource claim entry delegates claim
