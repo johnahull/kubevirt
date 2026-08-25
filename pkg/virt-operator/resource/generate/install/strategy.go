@@ -84,6 +84,7 @@ type StrategyInterface interface {
 	ControllerDeployments() []*appsv1.Deployment
 	ExportProxyDeployments() []*appsv1.Deployment
 	SynchronizationControllerDeployments() []*appsv1.Deployment
+	ManagedClaimControllerDeployments() []*appsv1.Deployment
 	VirtTemplateDeployments() []*appsv1.Deployment
 	DaemonSets() []*appsv1.DaemonSet
 	ValidatingWebhookConfigurations() []*admissionregistrationv1.ValidatingWebhookConfiguration
@@ -205,6 +206,18 @@ func (ins *Strategy) SynchronizationControllerDeployments() []*appsv1.Deployment
 
 	for _, deployment := range ins.deployments {
 		if !strings.Contains(deployment.Name, "virt-synchronization-controller") {
+			continue
+		}
+		deployments = append(deployments, deployment)
+	}
+	return deployments
+}
+
+func (ins *Strategy) ManagedClaimControllerDeployments() []*appsv1.Deployment {
+	var deployments []*appsv1.Deployment
+
+	for _, deployment := range ins.deployments {
+		if !strings.Contains(deployment.Name, "virt-managed-claim-controller") {
 			continue
 		}
 		deployments = append(deployments, deployment)
@@ -619,6 +632,9 @@ func GenerateCurrentInstallStrategy(config *operatorutil.KubeVirtDeploymentConfi
 
 	synchronizationControllerDeployment := components.NewSynchronizationControllerDeployment(config, productName, productVersion, productComponent)
 	strategy.deployments = append(strategy.deployments, synchronizationControllerDeployment)
+
+	managedClaimControllerDeployment := components.NewManagedClaimControllerDeployment(config, productName, productVersion, productComponent)
+	strategy.deployments = append(strategy.deployments, managedClaimControllerDeployment)
 
 	handler := components.NewHandlerDaemonSet(config, productName, productVersion, productComponent)
 
