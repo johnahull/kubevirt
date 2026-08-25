@@ -66,6 +66,22 @@ func (r *Reconciler) updateKubeVirtSystem(controllerDeploymentsRolledOver bool) 
 		}
 	}
 
+	// create/update managed-claim controller Deployments
+	for _, deployment := range r.targetStrategy.ManagedClaimControllerDeployments() {
+		if r.isFeatureGateEnabled(featuregate.ManagedDRAClaimsGate) {
+			deployment, err := r.syncDeployment(deployment)
+			if err != nil {
+				return false, err
+			}
+			err = r.syncPodDisruptionBudgetForDeployment(deployment)
+			if err != nil {
+				return false, err
+			}
+		} else if err := r.deleteDeployment(deployment); err != nil {
+			return false, err
+		}
+	}
+
 	// create/update virt-template Deployments
 	for _, deployment := range r.targetStrategy.VirtTemplateDeployments() {
 		if r.virtTemplateDeploymentEnabled() {

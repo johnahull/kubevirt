@@ -1274,6 +1274,14 @@ func synchronizationControllerEnabled(kv *v1.KubeVirt) bool {
 	return featuregate.IsEnabled(featuregate.DecentralizedLiveMigration, kv.Spec.Configuration.DeveloperConfiguration)
 }
 
+func enableManagedDRAClaimsFeatureGate(kv *v1.KubeVirt) {
+	enableFeatureGate(kv, featuregate.ManagedDRAClaimsGate)
+}
+
+func managedClaimControllerEnabled(kv *v1.KubeVirt) bool {
+	return featuregate.IsEnabled(featuregate.ManagedDRAClaimsGate, kv.Spec.Configuration.DeveloperConfiguration)
+}
+
 func virtTemplateDeploymentEnabled(kv *v1.KubeVirt) bool {
 	if !featuregate.IsEnabled(featuregate.Template, kv.Spec.Configuration.DeveloperConfiguration) {
 		return false
@@ -1604,6 +1612,9 @@ func (k *KubeVirtTestData) makeDeploymentsReady(kv *v1.KubeVirt) {
 
 	if synchronizationControllerEnabled(kv) {
 		deployments = append(deployments, "/virt-synchronization-controller")
+	}
+	if managedClaimControllerEnabled(kv) {
+		deployments = append(deployments, "/"+components.VirtManagedClaimControllerName)
 	}
 	if virtTemplateDeploymentEnabled(kv) {
 		deployments = append(
@@ -4158,6 +4169,110 @@ var _ = Describe("KubeVirt Operator", func() {
 			_, exists, err := kvTestData.controller.stores.MutatingWebhookCache.GetByKey(components.VirtLauncherPodMutatingWebhookName)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(exists).To(BeTrue(), "virt-launcher-pod-mutator webhook should exist when ContainerPathVolumes is enabled")
+		})
+	})
+
+	Context("ManagedDRAClaims feature gate", func() {
+		var kvTestData *KubeVirtTestData
+
+		BeforeEach(func() {
+			kvTestData = &KubeVirtTestData{}
+			kvTestData.BeforeTest()
+			DeferCleanup(kvTestData.AfterTest)
+		})
+
+		It("should create the managed-claim controller deployment when the gate is enabled after being disabled", func() {
+			kv := &v1.KubeVirt{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-install",
+					Namespace:  NAMESPACE,
+					Finalizers: []string{util.KubeVirtFinalizer},
+				},
+			}
+			disableTemplateFeatureGate(kv)
+			disableDecentralizedLiveMigrationFeatureGate(kv)
+			config := util.GetTargetConfigFromKVWithEnvVarManager(kv, kvTestData.mockEnvVarManager)
+
+			newKv := kv.DeepCopy()
+			newKv.ObjectMeta.Generation = 2
+			enableManagedDRAClaimsFeatureGate(newKv)
+			newConfig := util.GetTargetConfigFromKVWithEnvVarManager(newKv, kvTestData.mockEnvVarManager)
+
+			kubecontroller.SetLatestApiVersionAnnotation(newKv)
+			kvTestData.addKubeVirt(newKv)
+			kvTestData.addInstallStrategy(newConfig)
+
+			// Add all resources excluding the managed-claim controller (simulating previous disabled state)
+			kvTestData.addAll(config, kv)
+			kvTestData.addPodsAndPodDisruptionBudgets(config, kv)
+
+			// Add updated Pods for new config
+			kvTestData.addPodsAndPodDisruptionBudgets(newConfig, newKv)
+			kvTestData.addVirtHandler(newConfig, newKv)
+			kvTestData.makeDeploymentsReady(kv)
+			kvTestData.makeHandlerReady()
+
+			kvTestData.shouldExpectCreations()
+			kvTestData.shouldExpectPatchesAndUpdates(newKv)
+			kvTestData.shouldExpectKubeVirtUpdateStatus(1)
+			kvTestData.fakeNamespaceModificationEvent()
+			kvTestData.shouldExpectNamespacePatch()
+
+			kvTestData.controller.Execute()
+
+			_, exists, err := kvTestData.controller.stores.DeploymentCache.GetByKey(NAMESPACE + "/" + components.VirtManagedClaimControllerName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(exists).To(BeTrue(), "managed-claim controller deployment should be created when ManagedDRAClaims is enabled")
+		})
+
+		It("should delete the managed-claim controller deployment when the gate is disabled after being enabled", func() {
+			kv := &v1.KubeVirt{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-install",
+					Namespace:  NAMESPACE,
+					Finalizers: []string{util.KubeVirtFinalizer},
+				},
+			}
+			disableTemplateFeatureGate(kv)
+			disableDecentralizedLiveMigrationFeatureGate(kv)
+			enableManagedDRAClaimsFeatureGate(kv)
+			config := util.GetTargetConfigFromKVWithEnvVarManager(kv, kvTestData.mockEnvVarManager)
+
+			newKv := kv.DeepCopy()
+			newKv.ObjectMeta.Generation = 2
+			// Remove the ManagedDRAClaims gate while keeping Template and
+			// DecentralizedLiveMigration disabled as in the previous state.
+			newKv.Spec.Configuration.DeveloperConfiguration.FeatureGates = nil
+			newConfig := util.GetTargetConfigFromKVWithEnvVarManager(newKv, kvTestData.mockEnvVarManager)
+
+			kvTestData.deleteFromCache = true
+			kubecontroller.SetLatestApiVersionAnnotation(newKv)
+			kvTestData.addKubeVirt(newKv)
+			kvTestData.addInstallStrategy(newConfig)
+
+			// Add all resources including the managed-claim controller (simulating previous enabled state)
+			kvTestData.addAll(config, kv)
+			managedClaimDeployment := components.NewManagedClaimControllerDeployment(config, "", "", "")
+			kvTestData.addDeployment(managedClaimDeployment, kv)
+			kvTestData.addPodDisruptionBudget(components.NewPodDisruptionBudgetForDeployment(managedClaimDeployment), kv)
+			kvTestData.addPodsAndPodDisruptionBudgets(config, kv)
+
+			kvTestData.addPodsAndPodDisruptionBudgets(newConfig, newKv)
+			kvTestData.addVirtHandler(newConfig, newKv)
+			kvTestData.makeDeploymentsReady(kv)
+			kvTestData.makeHandlerReady()
+
+			kvTestData.shouldExpectDeletions()
+			kvTestData.fakeNamespaceModificationEvent()
+			kvTestData.shouldExpectNamespacePatch()
+			kvTestData.shouldExpectPatchesAndUpdates(newKv)
+			kvTestData.shouldExpectKubeVirtUpdateStatus(1)
+
+			kvTestData.controller.Execute()
+
+			_, exists, err := kvTestData.controller.stores.DeploymentCache.GetByKey(NAMESPACE + "/" + components.VirtManagedClaimControllerName)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(exists).To(BeFalse(), "managed-claim controller deployment should be deleted when ManagedDRAClaims is disabled")
 		})
 	})
 
