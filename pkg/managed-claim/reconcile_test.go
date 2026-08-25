@@ -162,6 +162,16 @@ var _ = Describe("Reconciler", func() {
 			Expect(claim.Labels).To(HaveKeyWithValue(ManagedClaimProvisionerLabel, "gpu-default"))
 		})
 
+		It("should label the claim with the VMI name", func() {
+			// The VMI name is carried on the owner reference already; a label
+			// makes claims selectable by VMI without walking owner references.
+			Expect(reconciler.Reconcile(context.Background(), vmi)).To(Succeed())
+
+			claim, err := getClaim()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(claim.Labels).To(HaveKeyWithValue(ManagedClaimVMILabel, "gpu-vm"))
+		})
+
 		It("should skip entries that are not managed", func() {
 			vmi.Spec.ResourceClaims = []v1.VirtualMachineInstanceResourceClaim{
 				{Name: "direct", ResourceClaimName: pointer.P("some-claim")},

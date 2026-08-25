@@ -44,6 +44,9 @@ const (
 	// ManagedClaimProvisionerLabel names the ManagedClaimProvisioner that
 	// configured the generation.
 	ManagedClaimProvisionerLabel = "kubevirt.io/managed-claim-provisioner"
+	// ManagedClaimVMILabel names the VMI a generated ResourceClaim belongs to,
+	// so claims can be selected by VMI without walking owner references.
+	ManagedClaimVMILabel = "kubevirt.io/managed-claim-vmi"
 )
 
 // ProvisionerStore looks up a cluster-scoped ManagedClaimProvisioner by name.
@@ -157,6 +160,7 @@ func (r *Reconciler) applyClaim(
 			Labels: map[string]string{
 				ManagedClaimLabel:            claim.Name,
 				ManagedClaimProvisionerLabel: provisioner.Name,
+				ManagedClaimVMILabel:         vmi.Name,
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: v1.VirtualMachineInstanceGroupVersionKind.GroupVersion().String(),
