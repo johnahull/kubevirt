@@ -308,6 +308,20 @@ func (mr *MockStrategyInterfaceMockRecorder) Instancetypes() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Instancetypes", reflect.TypeOf((*MockStrategyInterface)(nil).Instancetypes))
 }
 
+// ManagedClaimControllerDeployments mocks base method.
+func (m *MockStrategyInterface) ManagedClaimControllerDeployments() []*v13.Deployment {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ManagedClaimControllerDeployments")
+	ret0, _ := ret[0].([]*v13.Deployment)
+	return ret0
+}
+
+// ManagedClaimControllerDeployments indicates an expected call of ManagedClaimControllerDeployments.
+func (mr *MockStrategyInterfaceMockRecorder) ManagedClaimControllerDeployments() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ManagedClaimControllerDeployments", reflect.TypeOf((*MockStrategyInterface)(nil).ManagedClaimControllerDeployments))
+}
+
 // MutatingWebhookConfigurations mocks base method.
 func (m *MockStrategyInterface) MutatingWebhookConfigurations() []*v12.MutatingWebhookConfiguration {
 	m.ctrl.T.Helper()
