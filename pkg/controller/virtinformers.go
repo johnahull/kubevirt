@@ -39,6 +39,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	extclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -58,6 +59,7 @@ import (
 	"kubevirt.io/api/core"
 	kubev1 "kubevirt.io/api/core/v1"
 	v1 "kubevirt.io/api/core/v1"
+	corev1alpha1 "kubevirt.io/api/core/v1alpha1"
 	exportv1 "kubevirt.io/api/export/v1"
 	instancetypeapi "kubevirt.io/api/instancetype"
 	instancetypev1beta1 "kubevirt.io/api/instancetype/v1beta1"
@@ -160,6 +162,12 @@ type KubeInformerFactory interface {
 
 	// Watches MigrationPolicy objects
 	MigrationPolicy() cache.SharedIndexInformer
+
+	// Watches ManagedClaimProvisioner objects
+	ManagedClaimProvisioner() cache.SharedIndexInformer
+
+	// Watches ResourceClaim objects
+	ResourceClaim() cache.SharedIndexInformer
 
 	// Watches Plugin objects
 	Plugin() cache.SharedIndexInformer
@@ -888,6 +896,20 @@ func (f *kubeInformerFactory) Plugin() cache.SharedIndexInformer {
 	return f.getInformer("pluginInformer", func() cache.SharedIndexInformer {
 		lw := cache.NewListWatchFromClient(f.virtClient.GeneratedKubeVirtClient().PluginV1alpha1().RESTClient(), plugin.ResourcePluginPlural, k8sv1.NamespaceAll, fields.Everything())
 		return cache.NewSharedIndexInformer(lw, &pluginv1alpha1.Plugin{}, f.defaultResync, cache.Indexers{})
+	})
+}
+
+func (f *kubeInformerFactory) ManagedClaimProvisioner() cache.SharedIndexInformer {
+	return f.getInformer("managedClaimProvisionerInformer", func() cache.SharedIndexInformer {
+		lw := cache.NewListWatchFromClient(f.virtClient.GeneratedKubeVirtClient().KubevirtV1alpha1().RESTClient(), corev1alpha1.ResourceManagedClaimProvisioners, k8sv1.NamespaceAll, fields.Everything())
+		return cache.NewSharedIndexInformer(lw, &corev1alpha1.ManagedClaimProvisioner{}, f.defaultResync, cache.Indexers{})
+	})
+}
+
+func (f *kubeInformerFactory) ResourceClaim() cache.SharedIndexInformer {
+	return f.getInformer("resourceClaimInformer", func() cache.SharedIndexInformer {
+		lw := cache.NewListWatchFromClient(f.k8sClient.ResourceV1().RESTClient(), "resourceclaims", k8sv1.NamespaceAll, fields.Everything())
+		return cache.NewSharedIndexInformer(lw, &resourcev1.ResourceClaim{}, f.defaultResync, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 	})
 }
 
