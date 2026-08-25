@@ -532,6 +532,7 @@ func GenerateCurrentInstallStrategy(config *operatorutil.KubeVirtDeploymentConfi
 	rbaclist = append(rbaclist, rbac.GetAllHandler(config.GetNamespace())...)
 	rbaclist = append(rbaclist, rbac.GetAllExportProxy(config.GetNamespace())...)
 	rbaclist = append(rbaclist, rbac.GetAllSynchronizationController(config.GetNamespace())...)
+	rbaclist = append(rbaclist, rbac.GetAllManagedClaimController(config.GetNamespace())...)
 
 	monitorServiceAccount := config.GetMonitorServiceAccountName()
 	isServiceAccountFound := monitorNamespace != ""
