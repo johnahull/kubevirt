@@ -29,6 +29,8 @@ implementation. Continue that way.
 | Rule 6 — `ManagedClaimProvisioner` admitter | `pkg/virt-api/.../admitters` | ✅ 9 specs green |
 | Rule 4 — immutability | `pkg/virt-api/.../admitters` | ✅ verified green |
 | Reconciler | `pkg/managed-claim` | ✅ compiles and green |
+| Controller + informer-backed store (Step 2) | `pkg/managed-claim` | ✅ green; `cmd/managed-claim-controller` builds |
+| Provisioner + ResourceClaim informers (Step 2) | `pkg/controller` | ✅ builds |
 | `ManagedClaimsReady` aggregation | `pkg/virt-controller/watch/vmi` | ✅ 7 specs green |
 | Codegen (Step 0) | whole tree | ✅ make generate clean; whole tree builds |
 
@@ -166,49 +168,39 @@ the clientset. This changes Step 2 (below).
 
 Run the test command at the top of this file. Fix the reconciler test compile errors and rule 4.
 
-### Step 2 — controller binary (`cmd/managed-claim-controller/`)
+### Step 2 - controller binary (`cmd/managed-claim-controller/`) - DONE
 
-Model on `cmd/synchronization-controller/synchronization-controller.go`: `pkg/service`, leader
-election via `pkg/virt-controller/leaderelectionconfig`, `kubecli`, healthz. **Simpler in one
-respect** — it serves no endpoint, so it needs no TLS cert bootstrap.
+Three commits on the branch:
+- `controller: add ManagedClaimProvisioner and ResourceClaim informers`: two memoized
+  factory methods in `pkg/controller/virtinformers.go`. The provisioner informer is
+  cluster-scoped (empty indexers); the ResourceClaim informer carries the namespace indexer.
+- `managed-claim: drive reconciliation from a controller`: `pkg/managed-claim/controller.go`
+  (Controller wrapping Reconciler; watches VMIs, provisioners, owned claims; re-enqueues with
+  rate limiting and records a Warning event on the VMI on failure) plus
+  `pkg/managed-claim/store.go` (informer-backed `ProvisionerStore` via
+  `cache.NewGenericLister`, returning a real `apierrors` NotFound that Rule 3 relies on).
+  Both TDD, all specs green.
+- `managed-claim: add the virt-managed-claim-controller binary`: the leader-elected binary
+  modeled on `synchronization-controller` minus the TLS cert bootstrap (plaintext `/healthz`
+  only, no data-plane endpoint), plus image build/push wiring in `hack/bazel-build-images.sh`,
+  `hack/bazel-push-images.sh`, root `BUILD.bazel`, and `cmd/managed-claim-controller/BUILD.bazel`.
 
-Wire it as:
-```go
-managedclaim.NewReconciler(
-    aligner.ProvisionerName,
-    &aligner.Provisioner{},
-    k8sClient,                 // kubernetes.Interface
-    provisionerStore,          // implements managedclaim.ProvisionerStore
-)
-```
+Two deliberate deviations from the original plan:
+- **No expectations machinery.** The Reconciler does a live Get-before-Create and a
+  DeepEqual-before-Update, so it is already idempotent and self-quiescing. Expectations would
+  add complexity with no failing test to justify it. If a future need appears (e.g. thundering
+  duplicate creates under heavy churn), reuse `pkg/controller/expectations.go` rather than
+  writing new machinery.
+- **`tools/manifest-templator` and `tools/csv-generator` were NOT touched here.** Threading a
+  `VirtManagedClaimControllerImage` through those tools requires the matching field on
+  `KubeVirtDeploymentConfig`, an env var name, getters, `deployments.go`, and `csv.go`: all
+  operator config machinery. That plumbing is inseparable from the Deployment that consumes it,
+  so it lands in Step 4, where the value flows end to end (flag → config → env var → Deployment)
+  in one coherent change.
 
-The only genuinely new piece is a `ProvisionerStore`. There is **no generated lister**
-(see Step 0), so back it with the ManagedClaimProvisioner informer's indexer. A
-`cache.NewGenericLister(informer.GetIndexer(), corev1alpha1.Resource("managedclaimprovisioners"))`
-returns a real `apierrors` NotFound, which Rule 3 relies on:
-
-```go
-type listerStore struct{ lister cache.GenericLister }
-
-func (s *listerStore) Get(name string) (*corev1alpha1.ManagedClaimProvisioner, error) {
-    obj, err := s.lister.Get(name)   // NotFound APIStatus error when absent
-    if err != nil {
-        return nil, err
-    }
-    return obj.(*corev1alpha1.ManagedClaimProvisioner), nil
-}
-```
-
-Build the informer itself in `pkg/controller/virtinformers.go` alongside the others, with a
-ListWatch on `kubevirt.KubevirtV1alpha1().ManagedClaimProvisioners()`.
-
-Still needed around it: VMI + ManagedClaimProvisioner informers, a workqueue, and expectations
-(reuse `pkg/controller/expectations.go` — do not write new machinery). The VEP asks the framework to
-provide expectations to provisioner controllers.
-
-Also wire the image build, mirroring `synchronization-controller`:
-`hack/bazel-build-images.sh`, `hack/bazel-push-images.sh`, root `BUILD.bazel`,
-`tools/manifest-templator/manifest-templator.go`, `tools/csv-generator/csv-generator.go`.
+The `BUILD.bazel` files here were hand-written from the known import set and verified with
+`go build`. Run `hack/bazel-generate.sh` on the fast machine to let gazelle/buildifier reconcile
+them (expected to be a no-op or whitespace-only); commit any delta as a separate generated commit.
 
 ### Step 3 — `ManagedClaimsReady` condition (single-writer)
 
@@ -229,9 +221,10 @@ Done in this branch:
 
 Remaining (integration, not yet wired): call `aggregateManagedClaimsConditions` from
 `updateStatus` in `lifecycle.go` next to `aggregateDataVolumesConditions` (~line 307), fed by a new
-ResourceClaim informer/indexer on the `vmi.Controller` (add a `ResourceClaim()` informer to
-`pkg/controller/virtinformers.go`, a `NewController` param, an enqueue-owning-VMI event handler, and a
-namespace+owner list in the sync path), all gated on `ManagedDRAClaims`. This uses the vendored
+ResourceClaim informer/indexer on the `vmi.Controller` (the `ResourceClaim()` informer already
+exists in `pkg/controller/virtinformers.go` from Step 2, so reuse it; add a `NewController` param, an
+enqueue-owning-VMI event handler, and a namespace+owner list in the sync path), all gated on
+`ManagedDRAClaims`. This uses the vendored
 `k8s.io/api/resource/v1` client — **no codegen** — but is best landed alongside Step 2 (the producer).
 
 ### Step 4 — virt-operator wiring
@@ -245,6 +238,13 @@ namespace+owner list in the sync path), all gated on `ManagedDRAClaims`. This us
   `virt-synchronization-controller`: `apply/reconcile.go:398` and `:616`, `apply/update.go:55`,
   `apply/core.go:817` (lease cleanup), plus `NewManagedClaimControllerDeployment` in
   `components/deployments.go` near `VirtSynchronizationControllerName` (line 50).
+- **Image-string plumbing (deferred here from Step 2):** add `VirtManagedClaimControllerImage`
+  to `KubeVirtDeploymentConfig` (`pkg/virt-operator/util/config.go`) with its
+  `VIRT_MANAGEDCLAIMCONTROLLER_IMAGE` env var name, getters, and digest handling; mirror
+  `VirtSynchronizationControllerImage` through `pkg/virt-operator/resource/generate/csv/csv.go`,
+  `components/deployments.go`, `tools/manifest-templator/manifest-templator.go`, and
+  `tools/csv-generator/csv-generator.go`. `NewManagedClaimControllerDeployment` consumes the
+  field, closing the flag → config → env var → Deployment flow in one commit.
 - **RBAC — two roles:**
   - New `rbac/managedclaimcontroller.go` modelled on `rbac/synchronizationcontroller.go:32`:
     `create/get/list/watch/update/delete` on `resourceclaims` in `resource.k8s.io`,
