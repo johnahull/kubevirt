@@ -62,6 +62,7 @@ func main() {
 	virtExportProxyImage := flag.String("virt-export-proxy-image", "", "custom image for virt-export-proxy. "+customImageExample)
 	virtExportServerImage := flag.String("virt-export-server-image", "", "custom image for virt-export-server. "+customImageExample)
 	virtSynchronizationControllerImage := flag.String("virt-synchronization-controller-image", "", "custom image for virt-synchronization-controller. "+customImageExample)
+	virtManagedClaimControllerImage := flag.String("virt-managedclaim-controller-image", "", "custom image for virt-managedclaim-controller. "+customImageExample)
 	virtTemplateApiserverImage := flag.String("virt-template-apiserver-image", "", "custom image for virt-template-apiserver. "+customImageExample)
 	virtTemplateControllerImage := flag.String("virt-template-controller-image", "", "custom image for virt-template-controller. "+customImageExample)
 	gsImage := flag.String("gs-image", "", "custom image for gs. "+customImageExample)
@@ -94,6 +95,7 @@ func main() {
 		VirtExportProxyImage:               *virtExportProxyImage,
 		VirtExportServerImage:              *virtExportServerImage,
 		VirtSynchronizationControllerImage: *virtSynchronizationControllerImage,
+		VirtManagedClaimControllerImage:    *virtManagedClaimControllerImage,
 		VirtTemplateApiserverImage:         *virtTemplateApiserverImage,
 		VirtTemplateControllerImage:        *virtTemplateControllerImage,
 		GsImage:                            *gsImage,

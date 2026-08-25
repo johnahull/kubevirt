@@ -506,7 +506,7 @@ func NewControllerDeployment(config *operatorutil.KubeVirtDeploymentConfig, prod
 }
 
 // Used for manifest generation only
-func NewOperatorDeployment(namespace, repository, imagePrefix, version, verbosity, kubeVirtVersionEnv, runbookURLTemplate, virtApiImageEnv, virtControllerImageEnv, virtHandlerImageEnv, virtLauncherImageEnv, virtExportProxyImageEnv, virtExportServerImageEnv, virtSynchronizationControllerImageEnv, virtTemplateApiserverImage, virtTemplateControllerImage, gsImage, prHelperImage, sidecarShimImage, image string, pullPolicy corev1.PullPolicy) *appsv1.Deployment {
+func NewOperatorDeployment(namespace, repository, imagePrefix, version, verbosity, kubeVirtVersionEnv, runbookURLTemplate, virtApiImageEnv, virtControllerImageEnv, virtHandlerImageEnv, virtLauncherImageEnv, virtExportProxyImageEnv, virtExportServerImageEnv, virtSynchronizationControllerImageEnv, virtManagedClaimControllerImageEnv, virtTemplateApiserverImage, virtTemplateControllerImage, gsImage, prHelperImage, sidecarShimImage, image string, pullPolicy corev1.PullPolicy) *appsv1.Deployment {
 
 	const kubernetesOSLinux = "linux"
 	podAntiAffinity := newPodAntiAffinity(kubevirtLabelKey, corev1.LabelHostname, metav1.LabelSelectorOpIn, []string{VirtOperatorName})
@@ -655,7 +655,7 @@ func NewOperatorDeployment(namespace, repository, imagePrefix, version, verbosit
 
 	envVars := generateVirtOperatorEnvVars(
 		runbookURLTemplate, virtApiImageEnv, virtControllerImageEnv, virtHandlerImageEnv, virtLauncherImageEnv, virtExportProxyImageEnv,
-		virtExportServerImageEnv, virtSynchronizationControllerImageEnv, virtTemplateApiserverImage, virtTemplateControllerImage, gsImage,
+		virtExportServerImageEnv, virtSynchronizationControllerImageEnv, virtManagedClaimControllerImageEnv, virtTemplateApiserverImage, virtTemplateControllerImage, gsImage,
 		prHelperImage, sidecarShimImage, kubeVirtVersionEnv,
 	)
 
@@ -891,7 +891,7 @@ func NewPodDisruptionBudgetForDeployment(deployment *appsv1.Deployment) *policyv
 }
 
 func generateVirtOperatorEnvVars(runbookURLTemplate, virtApiImageEnv, virtControllerImageEnv, virtHandlerImageEnv, virtLauncherImageEnv, virtExportProxyImageEnv,
-	virtExportServerImageEnv, virtSynchronizationControllerImageEnv, virtTemplateApiserverImage, virtTemplateControllerImage, gsImage, prHelperImage,
+	virtExportServerImageEnv, virtSynchronizationControllerImageEnv, virtManagedClaimControllerImageEnv, virtTemplateApiserverImage, virtTemplateControllerImage, gsImage, prHelperImage,
 	sidecarShimImage, kubeVirtVersionEnv string) (envVars []corev1.EnvVar) {
 
 	addEnvVar := func(envVarName, envVarValue string) {
@@ -927,6 +927,10 @@ func generateVirtOperatorEnvVars(runbookURLTemplate, virtApiImageEnv, virtContro
 
 	if virtSynchronizationControllerImageEnv != "" {
 		addEnvVar(operatorutil.VirtSynchronizationControllerImageEnvName, virtSynchronizationControllerImageEnv)
+	}
+
+	if virtManagedClaimControllerImageEnv != "" {
+		addEnvVar(operatorutil.VirtManagedClaimControllerImageEnvName, virtManagedClaimControllerImageEnv)
 	}
 
 	if virtTemplateApiserverImage != "" {
