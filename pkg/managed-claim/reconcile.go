@@ -47,6 +47,11 @@ const (
 	// ManagedClaimVMILabel names the VMI a generated ResourceClaim belongs to,
 	// so claims can be selected by VMI without walking owner references.
 	ManagedClaimVMILabel = "kubevirt.io/managed-claim-vmi"
+	// ManagedClaimFinalizer protects a generated ResourceClaim from being
+	// removed out from under a running VMI. Owner-reference garbage collection
+	// still deletes the claim, but only once this controller has released the
+	// finalizer during VMI teardown.
+	ManagedClaimFinalizer = "kubevirt.io/managed-claim-protection"
 )
 
 // ProvisionerStore looks up a cluster-scoped ManagedClaimProvisioner by name.
@@ -90,10 +95,11 @@ func NewReconciler(
 // name should not strand every other claim on the VMI. All errors are returned
 // together so the caller can retry and report them.
 func (r *Reconciler) Reconcile(ctx context.Context, vmi *v1.VirtualMachineInstance) error {
-	// Owner-reference garbage collection cleans up anything already created,
-	// so there is nothing to do for a VMI on its way out.
+	// A VMI on its way out must have the finalizer released from its managed
+	// claims, otherwise owner-reference garbage collection can never remove
+	// them and VMI deletion wedges forever.
 	if vmi.DeletionTimestamp != nil {
-		return nil
+		return r.releaseClaims(ctx, vmi)
 	}
 
 	var errs []error
@@ -146,6 +152,97 @@ func (r *Reconciler) reconcileClaim(
 	return r.applyClaim(ctx, vmi, claim, provisioner, spec)
 }
 
+// releaseClaims removes this controller's finalizer from the managed claims of
+// a VMI that is being deleted, so owner-reference garbage collection can
+// complete. As during normal reconciliation, one failure does not abandon the
+// other claims.
+func (r *Reconciler) releaseClaims(ctx context.Context, vmi *v1.VirtualMachineInstance) error {
+	var errs []error
+	for i := range vmi.Spec.ResourceClaims {
+		claim := vmi.Spec.ResourceClaims[i]
+		if !dra.IsManagedClaim(claim) {
+			continue
+		}
+
+		if err := r.releaseClaim(ctx, vmi, &claim); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"managed claim %q (provisioner %q): %w",
+				claim.Name, *claim.ManagedClaimProvisionerName, err))
+		}
+	}
+
+	return utilerrors.NewAggregate(errs)
+}
+
+func (r *Reconciler) releaseClaim(
+	ctx context.Context,
+	vmi *v1.VirtualMachineInstance,
+	claim *v1.VirtualMachineInstanceResourceClaim,
+) error {
+	provisioner, err := r.store.Get(*claim.ManagedClaimProvisionerName)
+	if errors.IsNotFound(err) {
+		// The provisioner is gone, so ownership cannot be confirmed; leave the
+		// finalizer for whichever controller does serve this claim.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	// Another controller serves this provisioner and owns its finalizer.
+	if provisioner.Spec.Provisioner != r.provisionerName {
+		return nil
+	}
+
+	name := dra.ManagedClaimName(vmi.Name, claim.Name)
+	existing, err := r.client.ResourceV1().ResourceClaims(vmi.Namespace).
+		Get(ctx, name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	return r.removeFinalizer(ctx, vmi.Namespace, existing)
+}
+
+func (r *Reconciler) removeFinalizer(
+	ctx context.Context,
+	namespace string,
+	existing *resourcev1.ResourceClaim,
+) error {
+	if !hasManagedClaimFinalizer(existing.Finalizers) {
+		return nil
+	}
+
+	updated := existing.DeepCopy()
+	updated.Finalizers = withoutManagedClaimFinalizer(updated.Finalizers)
+
+	_, err := r.client.ResourceV1().ResourceClaims(namespace).
+		Update(ctx, updated, metav1.UpdateOptions{})
+	return err
+}
+
+func hasManagedClaimFinalizer(finalizers []string) bool {
+	for _, f := range finalizers {
+		if f == ManagedClaimFinalizer {
+			return true
+		}
+	}
+	return false
+}
+
+func withoutManagedClaimFinalizer(finalizers []string) []string {
+	kept := make([]string, 0, len(finalizers))
+	for _, f := range finalizers {
+		if f != ManagedClaimFinalizer {
+			kept = append(kept, f)
+		}
+	}
+	return kept
+}
+
 func (r *Reconciler) applyClaim(
 	ctx context.Context,
 	vmi *v1.VirtualMachineInstance,
@@ -155,8 +252,9 @@ func (r *Reconciler) applyClaim(
 ) error {
 	desired := &resourcev1.ResourceClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      dra.ManagedClaimName(vmi.Name, claim.Name),
-			Namespace: vmi.Namespace,
+			Name:       dra.ManagedClaimName(vmi.Name, claim.Name),
+			Namespace:  vmi.Namespace,
+			Finalizers: []string{ManagedClaimFinalizer},
 			Labels: map[string]string{
 				ManagedClaimLabel:            claim.Name,
 				ManagedClaimProvisionerLabel: provisioner.Name,
@@ -184,10 +282,20 @@ func (r *Reconciler) applyClaim(
 		return err
 	}
 
+	// The claim was deleted externally while the VMI is still alive: the
+	// finalizer has held it in a terminating state. Release the finalizer so
+	// garbage collection can finish removing it; a later reconcile recreates it
+	// through the not-found path above once it is gone.
+	if existing.DeletionTimestamp != nil {
+		return r.removeFinalizer(ctx, vmi.Namespace, existing)
+	}
+
 	// Only write when something actually differs. Reconciling on every VMI
 	// event is normal, and an unconditional update would rewrite the claim
 	// each time, churning resourceVersion and re-triggering watchers.
-	if equality.Semantic.DeepEqual(existing.Spec, desired.Spec) &&
+	needsFinalizer := !hasManagedClaimFinalizer(existing.Finalizers)
+	if !needsFinalizer &&
+		equality.Semantic.DeepEqual(existing.Spec, desired.Spec) &&
 		equality.Semantic.DeepEqual(existing.Labels, desired.Labels) &&
 		equality.Semantic.DeepEqual(existing.OwnerReferences, desired.OwnerReferences) {
 		return nil
@@ -197,6 +305,9 @@ func (r *Reconciler) applyClaim(
 	updated.Spec = desired.Spec
 	updated.Labels = desired.Labels
 	updated.OwnerReferences = desired.OwnerReferences
+	if needsFinalizer {
+		updated.Finalizers = append(updated.Finalizers, ManagedClaimFinalizer)
+	}
 
 	_, err = claims.Update(ctx, updated, metav1.UpdateOptions{})
 	return err
