@@ -20,8 +20,6 @@
 package aligner
 
 import (
-	"testing"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -31,14 +29,9 @@ import (
 
 	v1 "kubevirt.io/api/core/v1"
 	corev1alpha1 "kubevirt.io/api/core/v1alpha1"
-	"kubevirt.io/client-go/testutils"
 
 	managedclaim "kubevirt.io/kubevirt/pkg/managed-claim"
 )
-
-func TestAligner(t *testing.T) {
-	testutils.KubeVirtTestSuiteSetup(t)
-}
 
 func claimRequest(claimName, requestName string) *v1.ClaimRequest {
 	return &v1.ClaimRequest{ClaimName: claimName, RequestName: requestName}
