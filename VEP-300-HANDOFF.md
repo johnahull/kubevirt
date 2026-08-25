@@ -62,7 +62,8 @@ Two known-unverified items:
 - New `staging/src/kubevirt.io/api/core/v1alpha1/` with `ManagedClaimProvisioner`,
   `ManagedClaimProvisionerSpec`, `ManagedClaimDeviceType`, plus resource-name constants.
 - `ManagedClaimProvisionerName *string` on `VirtualMachineInstanceResourceClaim` (`core/v1/types.go`).
-- `VirtualMachineInstanceManagedClaimProvisioningFailed` condition type.
+- `VirtualMachineInstanceManagedClaimProvisioningFailed` condition type (later replaced by the
+  single-writer `ManagedClaimsReady` condition — see Step 3).
 - `ManagedDRAClaims` gate: const + `RegisterFeatureGate` in `pkg/virt-config/featuregate/active.go`,
   accessor `ManagedDRAClaimsEnabled()` in `pkg/virt-config/feature-gates.go`.
 - All five generators wired in `hack/generate.sh` (swagger-doc, deepcopy-gen, **openapi-gen**,
@@ -183,13 +184,29 @@ Also wire the image build, mirroring `synchronization-controller`:
 `hack/bazel-build-images.sh`, `hack/bazel-push-images.sh`, root `BUILD.bazel`,
 `tools/manifest-templator/manifest-templator.go`, `tools/csv-generator/csv-generator.go`.
 
-### Step 3 — `ManagedClaimProvisioningFailed` condition
+### Step 3 — `ManagedClaimsReady` condition (single-writer)
 
-Not yet written. The condition type exists (`core/v1/types.go`); nothing sets it. Per the VEP: reason
-`FailedCreateResourceClaim`, message naming the claim entry and provisioner, plus a matching event,
-cleared on successful reconcile. Reuse `pkg/controller/conditions.go`. The reconciler already returns
-aggregated errors carrying the claim entry and provisioner name — wire those into the condition.
-Needs `patch` on `virtualmachineinstances/status`.
+**Design constraint:** VMI status has a single writer, virt-controller, which persists it via a
+full-object `Update` (`pkg/virt-controller/watch/vmi/vmi.go`). A provisioner controller must **never**
+patch `virtualmachineinstances/status`; doing so races virt-controller's Update and violates the
+invariant. So provisioning state is surfaced the same way DataVolume readiness is
+(`aggregateDataVolumesConditions`): the provisioner controller owns only the ResourceClaims and emits
+**events** for generation failures, and virt-controller mirrors the owned ResourceClaims onto the VMI.
+
+Done in this branch:
+- `core/v1/types.go` defines `VirtualMachineInstanceManagedClaimsReady` plus the
+  `...ReasonAllManagedClaimsReady` / `...ReasonNotAllManagedClaimsReady` reasons (the old
+  provisioner-written `ManagedClaimProvisioningFailed` condition was removed).
+- `pkg/virt-controller/watch/vmi/managedclaims.go` implements
+  `aggregateManagedClaimsConditions(vmiCopy, claims)`: True once every managed entry has a
+  ResourceClaim with `.status.allocation` set, False otherwise. Unit-tested in `managedclaims_test.go`.
+
+Remaining (integration, not yet wired): call `aggregateManagedClaimsConditions` from
+`updateStatus` in `lifecycle.go` next to `aggregateDataVolumesConditions` (~line 307), fed by a new
+ResourceClaim informer/indexer on the `vmi.Controller` (add a `ResourceClaim()` informer to
+`pkg/controller/virtinformers.go`, a `NewController` param, an enqueue-owning-VMI event handler, and a
+namespace+owner list in the sync path), all gated on `ManagedDRAClaims`. This uses the vendored
+`k8s.io/api/resource/v1` client — **no codegen** — but is best landed alongside Step 2 (the producer).
 
 ### Step 4 — virt-operator wiring
 
@@ -204,9 +221,10 @@ Needs `patch` on `virtualmachineinstances/status`.
   `components/deployments.go` near `VirtSynchronizationControllerName` (line 50).
 - **RBAC — two roles:**
   - New `rbac/managedclaimcontroller.go` modelled on `rbac/synchronizationcontroller.go:32`:
-    `create/get/list/watch/update/delete` on `resourceclaims` in `resource.k8s.io`, `patch` on
-    `virtualmachineinstances/status`, `get/list/watch` on `virtualmachineinstances` and
-    `managedclaimprovisioners`. Splice its `GetAll…(namespace)` into the `rbaclist` in
+    `create/get/list/watch/update/delete` on `resourceclaims` in `resource.k8s.io`,
+    `get/list/watch` on `virtualmachineinstances` and `managedclaimprovisioners`, and `create/patch`
+    on `events`. **No** access to `virtualmachineinstances/status` — the provisioner never writes VMI
+    status (see Step 3). Splice its `GetAll…(namespace)` into the `rbaclist` in
     `install/strategy.go` — a separate step from CRD/Deployment registration.
   - **virt-api** needs `get/list/watch` on `managedclaimprovisioners` in `rbac/apiserver.go:41`,
     or the Rule 3 closure validator 403s at admission.
@@ -238,9 +256,10 @@ Needs `patch` on `virtualmachineinstances/status`.
 ## Alpha limitations to document rather than fix
 
 - **A down provisioner controller is indistinguishable from a slow one.**
-  `ManagedClaimProvisioningFailed` is only set by a controller that ran and failed. If the Deployment
-  is unavailable or hasn't won leader election, no claim appears, the pod sits `Pending`, and no
-  condition is ever set. Rule 3 catches typos, not liveness. The VEP acknowledges this.
+  `ManagedClaimsReady` is aggregated from ResourceClaims that exist. If the Deployment is unavailable
+  or hasn't won leader election, no claim appears, so the condition simply stays `False`
+  (NotAllManagedClaimsReady) and the pod sits `Pending` — the same signal as a claim still being
+  allocated. Rule 3 catches typos, not liveness. The VEP acknowledges this.
 - **Rolling-upgrade name skew** — see design decision 1.
 - **Rule 3 does not cover the VM/VMIRS creation paths.** They call
   `ValidateVirtualMachineInstanceSpec` directly, which has no cluster access. A bad reference there

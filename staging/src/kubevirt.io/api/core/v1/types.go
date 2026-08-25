@@ -739,11 +739,12 @@ const (
 	// Summarizes that all the DataVolumes attached to the VMI are Ready or not
 	VirtualMachineInstanceDataVolumesReady VirtualMachineInstanceConditionType = "DataVolumesReady"
 
-	// Indicates that a provisioner controller failed to generate a managed
-	// ResourceClaim for one of the VMI's spec.resourceClaims[] entries. This
-	// condition is diagnostic only; it is not a pod-creation readiness
-	// handshake. It is cleared once the claim reconciles successfully.
-	VirtualMachineInstanceManagedClaimProvisioningFailed VirtualMachineInstanceConditionType = "ManagedClaimProvisioningFailed"
+	// Summarizes whether every managed ResourceClaim generated for the VMI's
+	// spec.resourceClaims[] entries has been created and allocated. virt-controller
+	// aggregates this from the ResourceClaims it owns, mirroring DataVolumesReady;
+	// the provisioner controllers never write VMI status. It is diagnostic only,
+	// not a pod-creation readiness handshake.
+	VirtualMachineInstanceManagedClaimsReady VirtualMachineInstanceConditionType = "ManagedClaimsReady"
 
 	// Indicates whether the VMI is live migratable
 	VirtualMachineInstanceIsStorageLiveMigratable VirtualMachineInstanceConditionType = "StorageLiveMigratable"
@@ -793,6 +794,10 @@ const (
 	VirtualMachineInstanceReasonNotAllDVsReady = "NotAllDVsReady"
 	// Reason means that all of the VMI's DVs are bound and ready
 	VirtualMachineInstanceReasonAllDVsReady = "AllDVsReady"
+	// Reason means that not all of the VMI's managed ResourceClaims are created and allocated
+	VirtualMachineInstanceReasonNotAllManagedClaimsReady = "NotAllManagedClaimsReady"
+	// Reason means that all of the VMI's managed ResourceClaims are created and allocated
+	VirtualMachineInstanceReasonAllManagedClaimsReady = "AllManagedClaimsReady"
 	// Indicates a generic reason that the VMI isn't migratable and more details are specified in the condition message.
 	VirtualMachineInstanceReasonNotMigratable = "NotMigratable"
 	// Reason means that the volume update change was cancelled
