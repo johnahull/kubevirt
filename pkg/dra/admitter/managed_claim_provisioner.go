@@ -44,8 +44,9 @@ type ProvisionerGetter interface {
 // This is a usability check rather than a correctness one: a typo would
 // otherwise leave the launcher pod pending indefinitely with nothing to
 // explain why, because no controller serves the misspelled provisioner. The
-// provisioner controller independently reports genuine generation failures
-// through the ManagedClaimProvisioningFailed condition.
+// provisioner controller independently reports genuine generation failures as
+// events, and virt-controller surfaces overall claim readiness through the
+// ManagedClaimsReady condition.
 //
 // Only the VMI create path is wired to this check. VirtualMachine and
 // VirtualMachineInstanceReplicaSet validate their templates through a pure
