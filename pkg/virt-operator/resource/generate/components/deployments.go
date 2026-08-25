@@ -48,6 +48,7 @@ const (
 	VirtOperatorName                  = "virt-operator"
 	VirtExportProxyName               = "virt-exportproxy"
 	VirtSynchronizationControllerName = "virt-synchronization-controller"
+	VirtManagedClaimControllerName    = "virt-managed-claim-controller"
 	VirtObservabilityControllerName   = "virt-observability-controller"
 
 	kubevirtLabelKey = "kubevirt.io"
@@ -837,6 +838,73 @@ func NewSynchronizationControllerDeployment(config *operatorutil.KubeVirtDeploym
 		},
 	}
 
+	container.SecurityContext = &corev1.SecurityContext{
+		AllowPrivilegeEscalation: pointer.P(false),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+
+	return deployment
+}
+
+func NewManagedClaimControllerDeployment(config *operatorutil.KubeVirtDeploymentConfig, productName, productVersion, productComponent string) *appsv1.Deployment {
+
+	podAntiAffinity := newPodAntiAffinity(kubevirtLabelKey, corev1.LabelHostname, metav1.LabelSelectorOpIn, []string{VirtManagedClaimControllerName})
+	deploymentName := VirtManagedClaimControllerName
+	imageName := fmt.Sprintf("%s%s", config.GetImagePrefix(), deploymentName)
+
+	env := operatorutil.NewEnvVarMap(config.GetExtraEnv())
+
+	deployment := newBaseDeployment(deploymentName, imageName, config.GetNamespace(), config.GetImageRegistry(), config.GetManagedClaimControllerVersion(), productName, productVersion, productComponent, config.VirtManagedClaimControllerImage, config.GetImagePullPolicy(), config.GetImagePullSecrets(), podAntiAffinity, env)
+
+	if deployment.Spec.Template.Annotations == nil {
+		deployment.Spec.Template.Annotations = make(map[string]string)
+	}
+	// The managed-claim controller only reconciles ResourceClaims, so it does not
+	// expose metrics for prometheus to scrape.
+	delete(deployment.Spec.Template.Labels, prometheusLabelKey)
+	deployment.Spec.Template.Annotations["openshift.io/required-scc"] = "restricted-v2"
+
+	attachProfileVolume(&deployment.Spec.Template.Spec)
+
+	pod := &deployment.Spec.Template.Spec
+	pod.ServiceAccountName = ManagedClaimControllerServiceAccountName
+	pod.SecurityContext = &corev1.PodSecurityContext{
+		RunAsNonRoot:   pointer.P(true),
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+
+	const healthPort = 8080
+	container := &deployment.Spec.Template.Spec.Containers[0]
+	container.Command = []string{
+		VirtManagedClaimControllerName,
+		"--port",
+		fmt.Sprintf("%d", healthPort),
+		"-v",
+		config.GetVerbosity(),
+	}
+	container.ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Scheme: corev1.URISchemeHTTP,
+				Port: intstr.IntOrString{
+					Type:   intstr.Int,
+					IntVal: healthPort,
+				},
+				Path: "/healthz",
+			},
+		},
+		InitialDelaySeconds: 15,
+		PeriodSeconds:       10,
+	}
+	container.Resources = corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("5m"),
+			corev1.ResourceMemory: resource.MustParse("150Mi"),
+		},
+	}
 	container.SecurityContext = &corev1.SecurityContext{
 		AllowPrivilegeEscalation: pointer.P(false),
 		Capabilities: &corev1.Capabilities{
