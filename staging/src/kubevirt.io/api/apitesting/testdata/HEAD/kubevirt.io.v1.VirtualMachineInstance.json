@@ -923,7 +923,8 @@
       {
         "name": "nameValue",
         "resourceClaimName": "resourceClaimNameValue",
-        "resourceClaimTemplateName": "resourceClaimTemplateNameValue"
+        "resourceClaimTemplateName": "resourceClaimTemplateNameValue",
+        "managedClaimProvisionerName": "managedClaimProvisionerNameValue"
       }
     ],
     "utilityVolumes": [
