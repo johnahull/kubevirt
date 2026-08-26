@@ -142,6 +142,9 @@ var _ = Describe("Controller", func() {
 			var event string
 			Eventually(recorder.Events).Should(Receive(&event))
 			Expect(event).To(ContainSubstring("Warning"))
+			// The reason is a user-facing contract: admins select these events
+			// by reason, so pin it rather than only the free-text message.
+			Expect(event).To(ContainSubstring(FailedProvisioningReason))
 			Expect(event).To(ContainSubstring("does-not-exist"))
 		})
 

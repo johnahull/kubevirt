@@ -256,6 +256,27 @@ var _ = Describe("Reconciler", func() {
 			Expect(claim.Spec.Devices.Requests[0].Exactly.DeviceClassName).To(Equal("gpu.example.com"))
 		})
 
+		It("should converge a claim whose labels drifted", func() {
+			// Labels are desired state too, not just the spec: they make claims
+			// selectable by VMI and provisioner. A label-only drift must be
+			// corrected even when the spec still matches, or selectors silently
+			// stop finding the claim.
+			Expect(reconciler.Reconcile(context.Background(), vmi)).To(Succeed())
+
+			claim, err := getClaim()
+			Expect(err).ToNot(HaveOccurred())
+			claim.Labels[ManagedClaimVMILabel] = "tampered"
+			_, err = client.ResourceV1().ResourceClaims(vmiNamespace).
+				Update(context.Background(), claim, metav1.UpdateOptions{})
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(reconciler.Reconcile(context.Background(), vmi)).To(Succeed())
+
+			claim, err = getClaim()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(claim.Labels).To(HaveKeyWithValue(ManagedClaimVMILabel, "gpu-vm"))
+		})
+
 		It("should restore its finalizer if an existing claim is missing it", func() {
 			// A claim created before this feature, or one whose finalizer was
 			// stripped, must be protected again on the next reconcile.
