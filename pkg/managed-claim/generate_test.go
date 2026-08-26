@@ -184,4 +184,34 @@ var _ = Describe("BuildConfigs", func() {
 		Expect(BuildConfigs(devices, provisionerWith(
 			deviceType(corev1alpha1.ManagedClaimDeviceTypeGPU, "gpu.example.com")))).To(BeEmpty())
 	})
+
+	It("should render one config per opaque device type in deviceTypeOrder", func() {
+		devices, err := CollectDevices(vmiWithDevices(), "aligned")
+		Expect(err).ToNot(HaveOccurred())
+
+		gpuType := deviceType(corev1alpha1.ManagedClaimDeviceTypeGPU, "gpu.example.com")
+		gpuType.Opaque = opaque("gpu.example.com")
+		netType := deviceType(corev1alpha1.ManagedClaimDeviceTypeNetwork, "sriov.example.com")
+		netType.Opaque = opaque("sriov.example.com")
+
+		// Declared out of order on purpose: BuildConfigs must order the output by
+		// deviceTypeOrder (GPU before Network), not by the provisioner's order,
+		// so the generated claim is byte-stable across reconciles.
+		configs := BuildConfigs(devices, provisionerWith(
+			netType,
+			deviceType(corev1alpha1.ManagedClaimDeviceTypeHostDevice, "pci.example.com"),
+			gpuType,
+		))
+
+		Expect(configs).To(Equal([]resourcev1.DeviceClaimConfiguration{
+			{
+				Requests:            []string{"gpu"},
+				DeviceConfiguration: resourcev1.DeviceConfiguration{Opaque: opaque("gpu.example.com")},
+			},
+			{
+				Requests:            []string{"nic"},
+				DeviceConfiguration: resourcev1.DeviceConfiguration{Opaque: opaque("sriov.example.com")},
+			},
+		}))
+	})
 })
