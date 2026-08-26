@@ -405,6 +405,7 @@ func getKubeVirtComponentsClusterRules() []rbacv1.PolicyRule {
 	all = append(all, GetAllHandler("")...)
 	all = append(all, GetAllExportProxy("")...)
 	all = append(all, GetAllSynchronizationController("")...)
+	all = append(all, GetAllManagedClaimController("")...)
 	all = append(all, GetAllCluster()...)
 
 	for _, resource := range all {
@@ -470,6 +471,7 @@ func getKubeVirtComponentsRules() []rbacv1.PolicyRule {
 	all = append(all, GetAllHandler("")...)
 	all = append(all, GetAllExportProxy("")...)
 	all = append(all, GetAllSynchronizationController("")...)
+	all = append(all, GetAllManagedClaimController("")...)
 	all = append(all, GetAllCluster()...)
 
 	for _, resource := range all {
