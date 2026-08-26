@@ -47,13 +47,12 @@ func CollectDevices(vmi *v1.VirtualMachineInstance, claimName string) (ManagedCl
 		}
 	}
 
-	interfacesByName := indexInterfacesByName(vmi.Spec.Domain.Devices.Interfaces)
 	for _, network := range vmi.Spec.Networks {
 		if !vmispec.IsDRANetwork(network) || network.ResourceClaim.ClaimName != claimName {
 			continue
 		}
 		managedNetwork := ManagedClaimNetwork{Network: network}
-		if iface, found := interfacesByName[network.Name]; found {
+		if iface := vmispec.LookupInterfaceByName(vmi.Spec.Domain.Devices.Interfaces, network.Name); iface != nil {
 			managedNetwork.Interface = iface
 		}
 		devices.Networks = append(devices.Networks, managedNetwork)
@@ -78,12 +77,4 @@ func CollectDevices(vmi *v1.VirtualMachineInstance, claimName string) (ManagedCl
 // here and derive the count using VEP-152's formula.
 func collectCPU(_ *v1.VirtualMachineInstance, _ string) (*CPUDRASource, error) {
 	return nil, nil
-}
-
-func indexInterfacesByName(interfaces []v1.Interface) map[string]*v1.Interface {
-	indexed := make(map[string]*v1.Interface, len(interfaces))
-	for i := range interfaces {
-		indexed[interfaces[i].Name] = &interfaces[i]
-	}
-	return indexed
 }

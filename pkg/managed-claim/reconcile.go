@@ -33,6 +33,7 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	corev1alpha1 "kubevirt.io/api/core/v1alpha1"
 
+	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/dra"
 	"kubevirt.io/kubevirt/pkg/pointer"
 )
@@ -102,14 +103,29 @@ func (r *Reconciler) Reconcile(ctx context.Context, vmi *v1.VirtualMachineInstan
 		return r.releaseClaims(ctx, vmi)
 	}
 
+	return forEachManagedClaim(vmi, func(claim *v1.VirtualMachineInstanceResourceClaim) error {
+		return r.reconcileClaim(ctx, vmi, claim)
+	})
+}
+
+// forEachManagedClaim runs fn against every managed claim entry on the VMI,
+// skipping entries this feature does not own. A failure on one entry does not
+// abandon the others: one mistyped provisioner name should not strand every
+// other claim on the VMI. All errors are wrapped with the offending entry and
+// its provisioner and returned together so the caller can retry and report
+// them.
+func forEachManagedClaim(
+	vmi *v1.VirtualMachineInstance,
+	fn func(claim *v1.VirtualMachineInstanceResourceClaim) error,
+) error {
 	var errs []error
 	for i := range vmi.Spec.ResourceClaims {
-		claim := vmi.Spec.ResourceClaims[i]
-		if !dra.IsManagedClaim(claim) {
+		claim := &vmi.Spec.ResourceClaims[i]
+		if !dra.IsManagedClaim(*claim) {
 			continue
 		}
 
-		if err := r.reconcileClaim(ctx, vmi, &claim); err != nil {
+		if err := fn(claim); err != nil {
 			errs = append(errs, fmt.Errorf(
 				"managed claim %q (provisioner %q): %w",
 				claim.Name, *claim.ManagedClaimProvisionerName, err))
@@ -157,21 +173,9 @@ func (r *Reconciler) reconcileClaim(
 // complete. As during normal reconciliation, one failure does not abandon the
 // other claims.
 func (r *Reconciler) releaseClaims(ctx context.Context, vmi *v1.VirtualMachineInstance) error {
-	var errs []error
-	for i := range vmi.Spec.ResourceClaims {
-		claim := vmi.Spec.ResourceClaims[i]
-		if !dra.IsManagedClaim(claim) {
-			continue
-		}
-
-		if err := r.releaseClaim(ctx, vmi, &claim); err != nil {
-			errs = append(errs, fmt.Errorf(
-				"managed claim %q (provisioner %q): %w",
-				claim.Name, *claim.ManagedClaimProvisionerName, err))
-		}
-	}
-
-	return utilerrors.NewAggregate(errs)
+	return forEachManagedClaim(vmi, func(claim *v1.VirtualMachineInstanceResourceClaim) error {
+		return r.releaseClaim(ctx, vmi, claim)
+	})
 }
 
 func (r *Reconciler) releaseClaim(
@@ -212,35 +216,16 @@ func (r *Reconciler) removeFinalizer(
 	namespace string,
 	existing *resourcev1.ResourceClaim,
 ) error {
-	if !hasManagedClaimFinalizer(existing.Finalizers) {
+	if !controller.HasFinalizer(existing, ManagedClaimFinalizer) {
 		return nil
 	}
 
 	updated := existing.DeepCopy()
-	updated.Finalizers = withoutManagedClaimFinalizer(updated.Finalizers)
+	controller.RemoveFinalizer(updated, ManagedClaimFinalizer)
 
 	_, err := r.client.ResourceV1().ResourceClaims(namespace).
 		Update(ctx, updated, metav1.UpdateOptions{})
 	return err
-}
-
-func hasManagedClaimFinalizer(finalizers []string) bool {
-	for _, f := range finalizers {
-		if f == ManagedClaimFinalizer {
-			return true
-		}
-	}
-	return false
-}
-
-func withoutManagedClaimFinalizer(finalizers []string) []string {
-	kept := make([]string, 0, len(finalizers))
-	for _, f := range finalizers {
-		if f != ManagedClaimFinalizer {
-			kept = append(kept, f)
-		}
-	}
-	return kept
 }
 
 func (r *Reconciler) applyClaim(
@@ -293,7 +278,7 @@ func (r *Reconciler) applyClaim(
 	// Only write when something actually differs. Reconciling on every VMI
 	// event is normal, and an unconditional update would rewrite the claim
 	// each time, churning resourceVersion and re-triggering watchers.
-	needsFinalizer := !hasManagedClaimFinalizer(existing.Finalizers)
+	needsFinalizer := !controller.HasFinalizer(existing, ManagedClaimFinalizer)
 	if !needsFinalizer &&
 		equality.Semantic.DeepEqual(existing.Spec, desired.Spec) &&
 		equality.Semantic.DeepEqual(existing.Labels, desired.Labels) &&
