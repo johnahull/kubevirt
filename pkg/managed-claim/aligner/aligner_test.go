@@ -153,6 +153,76 @@ var _ = Describe("Topology aligner", func() {
 		})
 	})
 
+	Describe("device-type combinations", func() {
+		It("should not constrain a single HostDevice", func() {
+			vmi := &v1.VirtualMachineInstance{
+				ObjectMeta: metav1.ObjectMeta{Name: "hostdev-vm", Namespace: "default"},
+				Spec: v1.VirtualMachineInstanceSpec{
+					Domain: v1.DomainSpec{Devices: v1.Devices{
+						HostDevices: []v1.HostDevice{{Name: "hd0", ClaimRequest: claimRequest("my-hostdev", "hostdev")}},
+					}},
+				},
+			}
+
+			spec, err := (&Provisioner{}).GenerateClaim(contextFor(vmi, "my-hostdev",
+				deviceType(corev1alpha1.ManagedClaimDeviceTypeHostDevice, "pci.example.com")))
+
+			Expect(err).ToNot(HaveOccurred())
+			// A single device has nothing to align against.
+			Expect(spec.Devices.Constraints).To(BeEmpty())
+		})
+
+		It("should PCIe-align a HostDevice with a NIC", func() {
+			vmi := &v1.VirtualMachineInstance{
+				ObjectMeta: metav1.ObjectMeta{Name: "hostdev-nic-vm", Namespace: "default"},
+				Spec: v1.VirtualMachineInstanceSpec{
+					Domain: v1.DomainSpec{Devices: v1.Devices{
+						HostDevices: []v1.HostDevice{{Name: "hd0", ClaimRequest: claimRequest("aligned-devices", "hostdev")}},
+						Interfaces:  []v1.Interface{{Name: "rdma-nic"}},
+					}},
+					Networks: []v1.Network{{
+						Name:          "rdma-nic",
+						NetworkSource: v1.NetworkSource{ResourceClaim: claimRequest("aligned-devices", "nic")},
+					}},
+				},
+			}
+
+			spec, err := (&Provisioner{}).GenerateClaim(contextFor(vmi, "aligned-devices",
+				deviceType(corev1alpha1.ManagedClaimDeviceTypeHostDevice, "pci.example.com"),
+				deviceType(corev1alpha1.ManagedClaimDeviceTypeNetwork, "sriov.example.com")))
+
+			Expect(err).ToNot(HaveOccurred())
+			// HostDevice precedes Network in deviceTypeOrder.
+			Expect(spec.Devices.Constraints).To(Equal([]resourcev1.DeviceConstraint{{
+				MatchAttribute: ptr.To(resourcev1.FullyQualifiedName(PCIeRootAttribute)),
+				Requests:       []string{"hostdev", "nic"},
+			}}))
+		})
+
+		It("should PCIe-align two HostDevices", func() {
+			vmi := &v1.VirtualMachineInstance{
+				ObjectMeta: metav1.ObjectMeta{Name: "two-hostdev-vm", Namespace: "default"},
+				Spec: v1.VirtualMachineInstanceSpec{
+					Domain: v1.DomainSpec{Devices: v1.Devices{
+						HostDevices: []v1.HostDevice{
+							{Name: "hd0", ClaimRequest: claimRequest("all-hostdevs", "hostdev0")},
+							{Name: "hd1", ClaimRequest: claimRequest("all-hostdevs", "hostdev1")},
+						},
+					}},
+				},
+			}
+
+			spec, err := (&Provisioner{}).GenerateClaim(contextFor(vmi, "all-hostdevs",
+				deviceType(corev1alpha1.ManagedClaimDeviceTypeHostDevice, "pci.example.com")))
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(spec.Devices.Constraints).To(Equal([]resourcev1.DeviceConstraint{{
+				MatchAttribute: ptr.To(resourcev1.FullyQualifiedName(PCIeRootAttribute)),
+				Requests:       []string{"hostdev0", "hostdev1"},
+			}}))
+		})
+	})
+
 	Describe("NUMA alignment", func() {
 		It("should add an unscoped NUMA constraint once CPUs join the claim", func() {
 			// CPUs are affine to multiple PCIe roots, so they align on NUMA
