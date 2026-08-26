@@ -183,8 +183,10 @@ func deviceClassesByType(
 }
 
 // requestCount is 1 for every passthrough device: KubeVirt supports exactly one
-// device per request. CPUs are the exception once VEP-152 lands, where the
-// count comes from that VEP's accounting formula.
+// device per request. CPUs are not an exception to the count: once VEP-152
+// lands they use DRA consumable capacity (grouped mode), where count stays 1
+// (one grouped device) and VEP-152's accounting formula feeds
+// Capacity.Requests rather than the count.
 func requestCount(_ corev1alpha1.ManagedClaimDeviceTypeName) int64 {
 	return 1
 }
