@@ -20,13 +20,23 @@
 package admitters
 
 import (
+	"context"
+	"encoding/json"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	admissionv1 "k8s.io/api/admission/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 
+	"kubevirt.io/api/core"
+	v1 "kubevirt.io/api/core/v1"
 	corev1alpha1 "kubevirt.io/api/core/v1alpha1"
+
+	"kubevirt.io/kubevirt/pkg/testutils"
+	"kubevirt.io/kubevirt/pkg/virt-config/featuregate"
 )
 
 var _ = Describe("Validating ManagedClaimProvisioner Admitter", func() {
@@ -132,5 +142,143 @@ var _ = Describe("Validating ManagedClaimProvisioner Admitter", func() {
 			Message: "spec.deviceTypes must contain at least one entry",
 			Field:   "spec.deviceTypes",
 		}))
+	})
+})
+
+var _ = Describe("Admitting ManagedClaimProvisioner", func() {
+	validProvisioner := func() *corev1alpha1.ManagedClaimProvisioner {
+		return &corev1alpha1.ManagedClaimProvisioner{
+			ObjectMeta: metav1.ObjectMeta{Name: "pcie-aligned"},
+			Spec: corev1alpha1.ManagedClaimProvisionerSpec{
+				Provisioner: "policy.kubevirt.io/aligner",
+				DeviceTypes: []corev1alpha1.ManagedClaimDeviceType{{
+					Name:            corev1alpha1.ManagedClaimDeviceTypeGPU,
+					DeviceClassName: "gpu.example.com",
+				}},
+			},
+		}
+	}
+
+	kv := &v1.KubeVirt{
+		ObjectMeta: metav1.ObjectMeta{Name: "kubevirt", Namespace: "kubevirt"},
+		Spec: v1.KubeVirtSpec{
+			Configuration: v1.KubeVirtConfiguration{
+				DeveloperConfiguration: &v1.DeveloperConfiguration{},
+			},
+		},
+		Status: v1.KubeVirtStatus{
+			Phase:               v1.KubeVirtPhaseDeploying,
+			DefaultArchitecture: "amd64",
+		},
+	}
+	config, _, kvStore := testutils.NewFakeClusterConfigUsingKV(kv)
+
+	setFeatureGates := func(gates ...string) {
+		kvConfig := kv.DeepCopy()
+		kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = gates
+		testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kvConfig)
+	}
+
+	provisionerGVR := metav1.GroupVersionResource{
+		Group:    core.GroupName,
+		Resource: corev1alpha1.ResourceManagedClaimProvisioners,
+	}
+
+	marshal := func(p *corev1alpha1.ManagedClaimProvisioner) []byte {
+		raw, err := json.Marshal(p)
+		Expect(err).ToNot(HaveOccurred())
+		return raw
+	}
+
+	admissionReview := func(op admissionv1.Operation, gvr metav1.GroupVersionResource, raw []byte) *admissionv1.AdmissionReview {
+		return &admissionv1.AdmissionReview{
+			Request: &admissionv1.AdmissionRequest{
+				Operation: op,
+				Resource:  gvr,
+				Object:    runtime.RawExtension{Raw: raw},
+			},
+		}
+	}
+
+	var admitter *ManagedClaimProvisionerAdmitter
+
+	BeforeEach(func() {
+		admitter = NewManagedClaimProvisionerAdmitter(config)
+		setFeatureGates()
+	})
+
+	AfterEach(func() {
+		setFeatureGates()
+	})
+
+	It("should reject an unexpected group", func() {
+		setFeatureGates(featuregate.ManagedDRAClaimsGate)
+		gvr := provisionerGVR
+		gvr.Group = "wrong.example.com"
+
+		resp := admitter.Admit(context.Background(),
+			admissionReview(admissionv1.Create, gvr, marshal(validProvisioner())))
+
+		Expect(resp.Allowed).To(BeFalse())
+		Expect(resp.Result.Message).To(ContainSubstring("unexpected group"))
+	})
+
+	It("should reject an unexpected resource", func() {
+		setFeatureGates(featuregate.ManagedDRAClaimsGate)
+		gvr := provisionerGVR
+		gvr.Resource = "wrongresources"
+
+		resp := admitter.Admit(context.Background(),
+			admissionReview(admissionv1.Create, gvr, marshal(validProvisioner())))
+
+		Expect(resp.Allowed).To(BeFalse())
+		Expect(resp.Result.Message).To(ContainSubstring("unexpected resource"))
+	})
+
+	It("should reject creation when the ManagedDRAClaims feature gate is disabled", func() {
+		resp := admitter.Admit(context.Background(),
+			admissionReview(admissionv1.Create, provisionerGVR, marshal(validProvisioner())))
+
+		Expect(resp.Allowed).To(BeFalse())
+		Expect(resp.Result.Message).To(Equal("ManagedDRAClaims feature gate is not enabled"))
+	})
+
+	It("should allow updates even when the ManagedDRAClaims feature gate is disabled", func() {
+		resp := admitter.Admit(context.Background(),
+			admissionReview(admissionv1.Update, provisionerGVR, marshal(validProvisioner())))
+
+		Expect(resp.Allowed).To(BeTrue())
+	})
+
+	It("should reject a malformed object body", func() {
+		setFeatureGates(featuregate.ManagedDRAClaimsGate)
+
+		resp := admitter.Admit(context.Background(),
+			admissionReview(admissionv1.Create, provisionerGVR, []byte("{not json")))
+
+		Expect(resp.Allowed).To(BeFalse())
+		Expect(resp.Result).ToNot(BeNil())
+	})
+
+	It("should allow a valid provisioner when the feature gate is enabled", func() {
+		setFeatureGates(featuregate.ManagedDRAClaimsGate)
+
+		resp := admitter.Admit(context.Background(),
+			admissionReview(admissionv1.Create, provisionerGVR, marshal(validProvisioner())))
+
+		Expect(resp.Allowed).To(BeTrue())
+	})
+
+	It("should reject an invalid provisioner and surface its validation causes", func() {
+		setFeatureGates(featuregate.ManagedDRAClaimsGate)
+		invalid := validProvisioner()
+		invalid.Spec.Provisioner = ""
+
+		resp := admitter.Admit(context.Background(),
+			admissionReview(admissionv1.Create, provisionerGVR, marshal(invalid)))
+
+		Expect(resp.Allowed).To(BeFalse())
+		Expect(resp.Result.Details.Causes).ToNot(BeEmpty())
+		Expect(resp.Result.Message).To(Equal(resp.Result.Details.Causes[0].Message))
 	})
 })
