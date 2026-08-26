@@ -27,6 +27,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	v1 "kubevirt.io/api/core/v1"
 	corev1alpha1 "kubevirt.io/api/core/v1alpha1"
@@ -106,7 +107,11 @@ var _ = Describe("[sig-compute]Managed DRA Claims", Serial, decorators.SigComput
 			components.VirtManagedClaimControllerName)
 	})
 
-	It("should generate a ResourceClaim from a VMI managed-claim entry", func() {
+	// provisionManagedVMI creates the cluster-scoped ManagedClaimProvisioner and
+	// a VMI whose hostDevice references a managed claim, registers LIFO-correct
+	// cleanup for both, and returns the created VMI and the name of the
+	// ResourceClaim the controller will generate for it.
+	provisionManagedVMI := func() (*v1.VirtualMachineInstance, string) {
 		namespace := testsuite.GetTestNamespace(nil)
 
 		By("creating a cluster-scoped ManagedClaimProvisioner")
@@ -173,8 +178,14 @@ var _ = Describe("[sig-compute]Managed DRA Claims", Serial, decorators.SigComput
 				"the VMI must be fully deleted so its managed claim is released")
 		})
 
+		return createdVMI, dra.ManagedClaimName(createdVMI.Name, managedClaimEntryName)
+	}
+
+	It("should generate a ResourceClaim from a VMI managed-claim entry", func() {
+		createdVMI, claimName := provisionManagedVMI()
+		namespace := createdVMI.Namespace
+
 		By("waiting for the generated ResourceClaim and asserting its metadata")
-		claimName := dra.ManagedClaimName(createdVMI.Name, managedClaimEntryName)
 		Eventually(func(g Gomega) {
 			claim, err := kubevirt.Client().ResourceV1().ResourceClaims(namespace).
 				Get(context.Background(), claimName, metav1.GetOptions{})
@@ -191,6 +202,43 @@ var _ = Describe("[sig-compute]Managed DRA Claims", Serial, decorators.SigComput
 				HaveField("Name", createdVMI.Name),
 				HaveField("UID", createdVMI.UID),
 			)))
+		}, timeout, pollingInterval).Should(Succeed())
+	})
+
+	It("should re-create a managed ResourceClaim deleted out of band", func() {
+		// The VEP's headline safety guarantee: an external delete of an in-use
+		// managed claim must not strand the VMI. The finalizer holds the claim
+		// in a terminating state, the controller releases it, GC removes it,
+		// and a later reconcile recreates it. This can only be exercised end to
+		// end against a real apiserver, since a fake clientset ignores
+		// finalizers on Delete and never produces the terminating state.
+		createdVMI, claimName := provisionManagedVMI()
+		namespace := createdVMI.Namespace
+
+		By("waiting for the initial generated ResourceClaim")
+		var originalUID types.UID
+		Eventually(func(g Gomega) {
+			claim, err := kubevirt.Client().ResourceV1().ResourceClaims(namespace).
+				Get(context.Background(), claimName, metav1.GetOptions{})
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(claim.Finalizers).To(ContainElement(managedclaim.ManagedClaimFinalizer))
+			originalUID = claim.UID
+		}, timeout, pollingInterval).Should(Succeed())
+
+		By("deleting the generated ResourceClaim out of band")
+		Expect(kubevirt.Client().ResourceV1().ResourceClaims(namespace).
+			Delete(context.Background(), claimName, metav1.DeleteOptions{})).To(Succeed())
+
+		By("waiting for the controller to recreate a fresh ResourceClaim")
+		// A distinct UID with no deletion timestamp proves the object was
+		// recreated, not merely observed mid-deletion.
+		Eventually(func(g Gomega) {
+			claim, err := kubevirt.Client().ResourceV1().ResourceClaims(namespace).
+				Get(context.Background(), claimName, metav1.GetOptions{})
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(claim.DeletionTimestamp).To(BeNil())
+			g.Expect(claim.UID).ToNot(Equal(originalUID))
+			g.Expect(claim.Finalizers).To(ContainElement(managedclaim.ManagedClaimFinalizer))
 		}, timeout, pollingInterval).Should(Succeed())
 	})
 })
