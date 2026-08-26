@@ -72,6 +72,16 @@ var _ = Describe("RBAC", func() {
 			Expect(clusterRole).ToNot(BeNil())
 			expectExactRuleDoesntExists(clusterRole.Rules, "", "secrets", "get", "list", "watch")
 		})
+
+		It("holds the managed-claim controller's resourceclaims permissions so it can install that ClusterRole", func() {
+			// RBAC escalation prevention requires the operator to already hold
+			// every permission the managed-claim controller's ClusterRole grants;
+			// resourceclaims create and update are unique to that controller.
+			clusterRole := getFirstItemOfType(forOperator, reflect.TypeOf(&rbacv1.ClusterRole{})).(*rbacv1.ClusterRole)
+			Expect(clusterRole).ToNot(BeNil())
+			expectExactRuleExists(clusterRole.Rules, "resource.k8s.io", "resourceclaims",
+				"get", "list", "watch", "create", "update")
+		})
 	})
 
 	Context("GetKubevirtComponentsServiceAccounts", func() {
