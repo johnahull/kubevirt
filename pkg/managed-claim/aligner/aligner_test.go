@@ -121,8 +121,7 @@ var _ = Describe("Topology aligner", func() {
 		It("should match the multi-GPU + NIC full-topology example", func() {
 			// The VEP's third example, minus its CPU request: cpu stays inert
 			// until VEP-152 lands. The PCIe constraint covers gpu0, gpu1 and
-			// nic; the NUMA constraint covers everything and carries no
-			// explicit request list.
+			// nic.
 			vmi := &v1.VirtualMachineInstance{
 				ObjectMeta: metav1.ObjectMeta{Name: "full-topology-vm", Namespace: "default"},
 				Spec: v1.VirtualMachineInstanceSpec{
@@ -224,10 +223,10 @@ var _ = Describe("Topology aligner", func() {
 	})
 
 	Describe("NUMA alignment", func() {
-		It("should add an unscoped NUMA constraint once CPUs join the claim", func() {
-			// CPUs are affine to multiple PCIe roots, so they align on NUMA
-			// rather than PCIe root. The NUMA constraint is emitted without a
-			// request list so it covers every request in the claim.
+		It("should not emit a NUMA constraint even when CPUs join the claim", func() {
+			// NUMA alignment is deferred until a memory DRA driver is
+			// available. Without co-located memory the constraint would
+			// misrepresent system guarantees. Only PCIe-root is emitted.
 			ctx := contextFor(&v1.VirtualMachineInstance{
 				ObjectMeta: metav1.ObjectMeta{Name: "vm", Namespace: "default"},
 				Spec: v1.VirtualMachineInstanceSpec{
@@ -243,9 +242,9 @@ var _ = Describe("Topology aligner", func() {
 			spec, err := (&Provisioner{}).GenerateClaim(ctx)
 
 			Expect(err).ToNot(HaveOccurred())
-			Expect(spec.Devices.Constraints).To(ContainElement(resourcev1.DeviceConstraint{
-				MatchAttribute: ptr.To(resourcev1.FullyQualifiedName(NUMANodeAttribute)),
-			}))
+			Expect(spec.Devices.Constraints).ToNot(ContainElement(
+				HaveField("MatchAttribute",
+					HaveValue(Equal(resourcev1.FullyQualifiedName(NUMANodeAttribute))))))
 		})
 	})
 

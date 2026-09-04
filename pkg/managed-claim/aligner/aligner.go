@@ -74,12 +74,10 @@ func (p *Provisioner) GenerateClaim(ctx *managedclaim.ManagedClaimContext) (*res
 // buildConstraints implements step 4 of the VEP algorithm.
 //
 // Passthrough devices (GPUs, host devices, NICs) align on PCIe root, which is
-// the boundary that actually determines peer-to-peer bandwidth. CPUs cannot:
-// a CPU group is affine to several PCIe roots, so the CPU DRA driver publishes
-// pcieRoot as a list attribute (KEP-5491) while GPU and NIC drivers publish a
-// scalar. Rather than rely on that set-intersection semantics for the whole
-// claim, CPUs pull the claim up to NUMA alignment, which every driver
-// publishes as a scalar under KEP-6072.
+// the boundary that actually determines peer-to-peer bandwidth.
+//
+// NUMA alignment is deferred until a memory DRA driver is available. Without
+// co-located memory the constraint would misrepresent system guarantees.
 func buildConstraints(devices managedclaim.ManagedClaimDevices) []resourcev1.DeviceConstraint {
 	var constraints []resourcev1.DeviceConstraint
 
@@ -94,14 +92,6 @@ func buildConstraints(devices managedclaim.ManagedClaimDevices) []resourcev1.Dev
 		constraints = append(constraints, resourcev1.DeviceConstraint{
 			MatchAttribute: ptr.To(resourcev1.FullyQualifiedName(PCIeRootAttribute)),
 			Requests:       passthrough,
-		})
-	}
-
-	// Emitted with no request list so it covers every request in the claim,
-	// including the CPUs themselves.
-	if devices.CPU != nil {
-		constraints = append(constraints, resourcev1.DeviceConstraint{
-			MatchAttribute: ptr.To(resourcev1.FullyQualifiedName(NUMANodeAttribute)),
 		})
 	}
 
