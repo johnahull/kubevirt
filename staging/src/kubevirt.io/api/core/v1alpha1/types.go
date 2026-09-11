@@ -70,8 +70,8 @@ type ManagedClaimProvisionerList struct {
 
 type ManagedClaimProvisionerSpec struct {
 	// Provisioner identifies the controller responsible for claim generation.
-	// KubeVirt ships policy.kubevirt.io/aligner, which applies PCIe-root and
-	// NUMA topology alignment. Third-party controllers use their own name.
+	// KubeVirt ships policy.kubevirt.io/aligner, which applies PCIe-root
+	// topology alignment. Third-party controllers use their own name.
 	//
 	// A managed claim is only reconciled once a controller serving this
 	// provisioner name is running; until then the launcher pod stays pending.
