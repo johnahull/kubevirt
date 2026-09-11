@@ -68,13 +68,9 @@ func CollectDevices(vmi *v1.VirtualMachineInstance, claimName string) (ManagedCl
 }
 
 // collectCPU is the single place that will change when VEP-152 lands.
-//
-// VEP-300 owns the managed-claim framework; VEP-152 owns the cpu.dra struct
-// (CPUDRASource) and the CPU accounting formula
-// (cores x sockets x threads + emulatorThreadCPUs + supplementalPoolThreadCount).
-// Until v1.CPU carries a DRA field there is nothing on the VMI that can name a
-// claim, so no VMI can reach this path. Once it does, read vmi.Spec.Domain.CPU.DRA
-// here and derive the count using VEP-152's formula.
+// VEP-152 owns the CPU struct and accounting formula. Until the VMI
+// carries a CPU DRA field there is nothing that can name a claim, so
+// no VMI can reach this path.
 func collectCPU(_ *v1.VirtualMachineInstance, _ string) (*CPUDRASource, error) {
 	return nil, nil
 }
