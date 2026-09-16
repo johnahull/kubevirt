@@ -319,6 +319,23 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 		return err
 	}
 
+	// VFIO passthrough requires locked memory for device DMA and a large
+	// 64-bit PCI aperture for devices with very large BARs such as MI300X.
+	if len(vmi.Spec.Domain.Devices.GPUs) > 0 || len(vmi.Spec.Domain.Devices.HostDevices) > 0 {
+		if domain.Spec.MemoryBacking == nil {
+			domain.Spec.MemoryBacking = &api.MemoryBacking{}
+		}
+		domain.Spec.MemoryBacking.Locked = &api.Locked{}
+
+		if domain.Spec.QEMUCmd == nil {
+			domain.Spec.QEMUCmd = &api.Commandline{}
+		}
+		domain.Spec.QEMUCmd.QEMUArg = append(domain.Spec.QEMUCmd.QEMUArg,
+			api.Arg{Value: "-global"},
+			api.Arg{Value: "q35-pcihost.x-pci-hole64-size=274877906944"},
+		)
+	}
+
 	if vmi.Spec.Domain.CPU != nil && vmi.IsCPUDedicated() {
 		// Adjust guest vcpu config. Currently will handle vCPUs to pCPUs pinning
 		if err := vcpu.AdjustDomainForTopologyAndCPUSet(domain, vmi, c.Topology, c.CPUSet); err != nil {

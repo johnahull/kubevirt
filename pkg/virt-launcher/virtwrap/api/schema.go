@@ -582,7 +582,11 @@ type MemoryBacking struct {
 	Access       *MemoryBackingAccess `xml:"access,omitempty"`
 	Allocation   *MemoryAllocation    `xml:"allocation,omitempty"`
 	NoSharePages *NoSharePages        `xml:"nosharepages,omitempty"`
+	Locked       *Locked              `xml:"locked,omitempty"`
 }
+
+// Locked enables QEMU to lock guest memory for VFIO DMA.
+type Locked struct{}
 
 type MemoryAllocationMode string
 
