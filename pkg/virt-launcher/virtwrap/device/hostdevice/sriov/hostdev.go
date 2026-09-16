@@ -32,6 +32,7 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 
 	virtwait "kubevirt.io/kubevirt/pkg/apimachinery/wait"
+	drautil "kubevirt.io/kubevirt/pkg/dra"
 	"kubevirt.io/kubevirt/pkg/network/deviceinfo"
 	"kubevirt.io/kubevirt/pkg/network/downwardapi"
 	"kubevirt.io/kubevirt/pkg/network/vmispec"
