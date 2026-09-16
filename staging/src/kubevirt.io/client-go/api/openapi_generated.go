@@ -41038,4 +41038,3 @@ func schema_kubevirtio_api_core_v1alpha1_ManagedClaimProvisionerSpec(ref common.
 			"kubevirt.io/api/core/v1alpha1.ManagedClaimDeviceType"},
 	}
 }
-
