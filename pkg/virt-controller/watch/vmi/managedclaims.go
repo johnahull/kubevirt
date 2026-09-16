@@ -20,6 +20,9 @@
 package vmi
 
 import (
+	"fmt"
+	"strings"
+
 	k8sv1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 
@@ -39,10 +42,12 @@ import (
 // writer. The condition is diagnostic; it does not gate pod creation.
 func aggregateManagedClaimsConditions(vmi *v1.VirtualMachineInstance, claims []*resourcev1.ResourceClaim) {
 	var managedEntries []string
+	managedProvisioners := make(map[string]string)
 	for i := range vmi.Spec.ResourceClaims {
 		claim := vmi.Spec.ResourceClaims[i]
 		if dra.IsManagedClaim(claim) {
 			managedEntries = append(managedEntries, claim.Name)
+			managedProvisioners[claim.Name] = *claim.ManagedClaimProvisionerName
 		}
 	}
 	// A VMI spec is immutable after admission, so managed entries are never
@@ -57,14 +62,20 @@ func aggregateManagedClaimsConditions(vmi *v1.VirtualMachineInstance, claims []*
 		claimsByName[claim.Name] = claim
 	}
 
-	ready := true
+	var missing []string
+	var unallocated []string
 	for _, entryName := range managedEntries {
-		claim, found := claimsByName[dra.ManagedClaimName(vmi.Name, entryName)]
-		if !found || claim.Status.Allocation == nil {
-			ready = false
-			break
+		resourceClaimName := dra.ManagedClaimName(vmi.Name, entryName)
+		claim, found := claimsByName[resourceClaimName]
+		if !found {
+			missing = append(missing, fmt.Sprintf("%s (provisioner %s)", resourceClaimName, managedProvisioners[entryName]))
+			continue
+		}
+		if claim.Status.Allocation == nil {
+			unallocated = append(unallocated, claim.Name)
 		}
 	}
+	ready := len(missing) == 0 && len(unallocated) == 0
 
 	condition := v1.VirtualMachineInstanceCondition{
 		Type:    v1.VirtualMachineInstanceManagedClaimsReady,
@@ -75,7 +86,14 @@ func aggregateManagedClaimsConditions(vmi *v1.VirtualMachineInstance, claims []*
 	if !ready {
 		condition.Status = k8sv1.ConditionFalse
 		condition.Reason = v1.VirtualMachineInstanceReasonNotAllManagedClaimsReady
-		condition.Message = "Not all of the VMI's managed ResourceClaims are created and allocated"
+		var details []string
+		if len(missing) > 0 {
+			details = append(details, fmt.Sprintf("not yet created: %s", strings.Join(missing, ", ")))
+		}
+		if len(unallocated) > 0 {
+			details = append(details, fmt.Sprintf("not yet allocated: %s", strings.Join(unallocated, ", ")))
+		}
+		condition.Message = "Managed ResourceClaims " + strings.Join(details, "; ")
 	}
 
 	controller.NewVirtualMachineInstanceConditionManager().UpdateCondition(vmi, &condition)

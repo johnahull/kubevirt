@@ -127,8 +127,11 @@ func forEachManagedClaim(
 
 		if err := fn(claim); err != nil {
 			errs = append(errs, fmt.Errorf(
-				"managed claim %q (provisioner %q): %w",
-				claim.Name, *claim.ManagedClaimProvisionerName, err))
+				"managed claim %q (resource claim %q, provisioner %q): %w",
+				claim.Name,
+				dra.ManagedClaimName(vmi.Name, claim.Name),
+				*claim.ManagedClaimProvisionerName,
+				err))
 		}
 	}
 

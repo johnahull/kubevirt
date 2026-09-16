@@ -95,6 +95,8 @@ var _ = Describe("Managed claim conditions", func() {
 			k8sv1.ConditionFalse,
 			v1.VirtualMachineInstanceReasonNotAllManagedClaimsReady,
 		)).To(BeTrue())
+		condition := condMgr.GetCondition(vmi, v1.VirtualMachineInstanceManagedClaimsReady)
+		Expect(condition.Message).To(Equal("Managed ResourceClaims not yet created: testvmi-gpu (provisioner pcie-aligned)"))
 	})
 
 	It("reports not ready when the ResourceClaim exists but is unallocated", func() {
@@ -107,6 +109,21 @@ var _ = Describe("Managed claim conditions", func() {
 			v1.VirtualMachineInstanceManagedClaimsReady,
 			k8sv1.ConditionFalse,
 		)).To(BeTrue())
+		condition := condMgr.GetCondition(vmi, v1.VirtualMachineInstanceManagedClaimsReady)
+		Expect(condition.Message).To(Equal("Managed ResourceClaims not yet allocated: testvmi-gpu"))
+	})
+
+	It("reports every missing and unallocated managed claim in spec order", func() {
+		vmi := newVMI(managedEntry("gpu"), managedEntry("nic"), managedEntry("storage"))
+
+		aggregateManagedClaimsConditions(vmi, []*resourcev1.ResourceClaim{
+			claimFor("gpu", false),
+		})
+
+		condition := condMgr.GetCondition(vmi, v1.VirtualMachineInstanceManagedClaimsReady)
+		Expect(condition.Message).To(Equal(
+			"Managed ResourceClaims not yet created: testvmi-nic (provisioner pcie-aligned), testvmi-storage (provisioner pcie-aligned); not yet allocated: testvmi-gpu",
+		))
 	})
 
 	It("reports ready when every managed ResourceClaim is allocated", func() {

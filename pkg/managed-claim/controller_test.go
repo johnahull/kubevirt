@@ -145,6 +145,7 @@ var _ = Describe("Controller", func() {
 			// The reason is a user-facing contract: admins select these events
 			// by reason, so pin it rather than only the free-text message.
 			Expect(event).To(ContainSubstring(FailedProvisioningReason))
+			Expect(event).To(ContainSubstring(derivedName))
 			Expect(event).To(ContainSubstring("does-not-exist"))
 		})
 
