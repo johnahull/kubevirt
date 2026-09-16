@@ -115,7 +115,7 @@ func SetDriverCacheMode(disk *api.Disk, directIOChecker DirectIOChecker) error {
 	supportDirectIO := true
 	mode := v1.DriverCache(disk.Driver.Cache)
 
-	if mode == "" || mode == v1.CacheNone || mode == v1.CacheDirectSync {
+	if mode == "" || mode == v1.CacheNone || mode == v1.DriverCache("directsync") {
 		if t.BackendIsBlock() {
 			supportDirectIO, err = directIOChecker.CheckBlockDevice(t.BackendPath())
 		} else {
@@ -141,7 +141,7 @@ func SetDriverCacheMode(disk *api.Disk, directIOChecker DirectIOChecker) error {
 	}
 
 	// if user set a cache mode that requires direct I/O and fs does not support it, return an error
-	if (mode == v1.CacheNone || mode == v1.CacheDirectSync) && !supportDirectIO {
+	if (mode == v1.CacheNone || mode == v1.DriverCache("directsync")) && !supportDirectIO {
 		return fmt.Errorf("Unable to use '%s' cache mode, file system where %s is stored does not support direct I/O", mode, t.BackendPath())
 	}
 
@@ -192,7 +192,7 @@ func SetOptimalIOMode(disk *api.Disk, isPreAllocated func(path string) bool) {
 
 	// O_DIRECT is needed for io="native"
 	cacheMode := v1.DriverCache(disk.Driver.Cache)
-	if cacheMode == v1.CacheNone || cacheMode == v1.CacheDirectSync {
+	if cacheMode == v1.CacheNone || cacheMode == v1.DriverCache("directsync") {
 		// set native for block device or pre-allocateed image file
 		if ds.BackendIsBlock() || isPreAllocated(ds.BackendPath()) {
 			disk.Driver.IO = v1.IONative
@@ -327,13 +327,24 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 		}
 		domain.Spec.MemoryBacking.Locked = &api.Locked{}
 
-		if domain.Spec.QEMUCmd == nil {
-			domain.Spec.QEMUCmd = &api.Commandline{}
+		hasPCIRoot := false
+		for _, controller := range domain.Spec.Devices.Controllers {
+			if controller.Type == "pci" && controller.Model == "pcie-root" {
+				hasPCIRoot = true
+				break
+			}
 		}
-		domain.Spec.QEMUCmd.QEMUArg = append(domain.Spec.QEMUCmd.QEMUArg,
-			api.Arg{Value: "-global"},
-			api.Arg{Value: "q35-pcihost.x-pci-hole64-size=274877906944"},
-		)
+		if !hasPCIRoot {
+			domain.Spec.Devices.Controllers = append(domain.Spec.Devices.Controllers, api.Controller{
+				Type:  "pci",
+				Index: "0",
+				Model: "pcie-root",
+				PCIHole64: &api.PCIHole64{
+					Value: 268435456,
+					Unit:  "KiB",
+				},
+			})
+		}
 	}
 
 	if vmi.Spec.Domain.CPU != nil && vmi.IsCPUDedicated() {
