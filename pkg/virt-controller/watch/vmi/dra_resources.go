@@ -53,6 +53,15 @@ func (c *Controller) handleDRAResourcesClaim(vmi *virtv1.VirtualMachineInstance)
 	if !usesCPUDRA && !usesMemoryDRA {
 		return nil
 	}
+	if _, ok := dra.ManualClaimName(vmi); ok {
+		if err := c.setUsesDRAResourcesAnnotation(vmi); err != nil {
+			return common.NewSyncError(
+				fmt.Errorf("failed to annotate vmi %s/%s as using DRA resources: %v", vmi.Namespace, vmi.Name, err),
+				controller.FailedDRAResourcesClaimCreateReason,
+			)
+		}
+		return nil
+	}
 
 	var hostCPUs int64
 	if usesCPUDRA {

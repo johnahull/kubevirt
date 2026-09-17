@@ -686,7 +686,8 @@ func (t *TemplateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 	}
 
 	podResourceClaims := drautil.ToPodResourceClaims(vmi.Spec.ResourceClaims)
-	if drautil.UsesCPUDRA(t.clusterConfig, vmi) || drautil.UsesMemoryDRA(t.clusterConfig, vmi) {
+	_, manualDRAClaim := drautil.ManualClaimName(vmi)
+	if !manualDRAClaim && (drautil.UsesCPUDRA(t.clusterConfig, vmi) || drautil.UsesMemoryDRA(t.clusterConfig, vmi)) {
 		claimName := drautil.ResourcesClaimName(vmi)
 		podResourceClaims = append(podResourceClaims, k8sv1.PodResourceClaim{
 			Name:              drautil.PodClaimName,
@@ -1638,6 +1639,10 @@ func (t *TemplateService) VMIResourcePredicates(vmi *v1.VirtualMachineInstance, 
 	additionalCPUs := SupplementalPoolIOThreadCPUs(vmi)
 	usesCPUDRA := drautil.UsesCPUDRA(t.clusterConfig, vmi)
 	usesMemoryDRA := drautil.UsesMemoryDRA(t.clusterConfig, vmi)
+	draClaimName := drautil.PodClaimName
+	if manualClaimName, ok := drautil.ManualClaimName(vmi); ok {
+		draClaimName = manualClaimName
+	}
 	return VMIResourcePredicates{
 		vmi: vmi,
 		resourceRules: []VMIResourceRule{
@@ -1647,7 +1652,7 @@ func (t *TemplateService) VMIResourcePredicates(vmi *v1.VirtualMachineInstance, 
 			NewVMIResourceRule(not(doesVMIRequireDedicatedCPU), WithoutDedicatedCPU(vmi, t.clusterConfig.GetCPUAllocationRatio(), withCPULimits)),
 			NewVMIResourceRule(func(vmi *v1.VirtualMachineInstance) bool {
 				return usesCPUDRA || usesMemoryDRA
-			}, WithDRAResources(usesCPUDRA, usesMemoryDRA)),
+			}, WithDRAResourcesForClaim(draClaimName, usesCPUDRA, usesMemoryDRA)),
 			// Kubelet requires the hugepages-* pod resource whenever the
 			// HugePages emptyDir volumes below are present, including when
 			// memory placement/allocation is handled by DRA. The DRA claim and

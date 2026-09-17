@@ -39,6 +39,12 @@ import (
 )
 
 const (
+	// ManualClaimAnnotation selects a VMI resource claim that contains the
+	// CPU/memory requests as well as any device requests. This lets callers
+	// use one manually authored claim for all DRA resources instead of the
+	// controller-generated CPU/memory claim.
+	ManualClaimAnnotation = "kubevirt.io/dra-manual-claim"
+
 	// CPUDeviceClassName is the DeviceClass a CPU DRA driver (e.g. dra-driver-cpu)
 	// is expected to publish grouped-mode CPU capacity under.
 	CPUDeviceClassName = "dra.cpu"
@@ -71,6 +77,24 @@ const (
 	// synthesized ResourceClaim's name.
 	resourcesClaimNameSuffix = "-dra"
 )
+
+// ManualClaimName returns the local PodResourceClaim name selected for a
+// manually authored all-resource claim, if one is configured on the VMI.
+func ManualClaimName(vmi *v1.VirtualMachineInstance) (string, bool) {
+	if vmi.Annotations == nil {
+		return "", false
+	}
+	name, ok := vmi.Annotations[ManualClaimAnnotation]
+	if !ok || name == "" {
+		return "", false
+	}
+	for _, claim := range vmi.Spec.ResourceClaims {
+		if claim.Name == name {
+			return name, true
+		}
+	}
+	return "", false
+}
 
 // UsesCPUDRA returns true when virt-controller should synthesize a CPU
 // DeviceRequest for this VMI instead of relying on kubelet CPU Manager.

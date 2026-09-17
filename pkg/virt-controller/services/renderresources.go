@@ -240,16 +240,23 @@ func WithNetworksDRA(networks []v1.Network) ResourceRendererOption {
 // control whether each request is referenced, since a VMI may use CPU DRA,
 // memory DRA, or both.
 func WithDRAResources(cpu, mem bool) ResourceRendererOption {
+	return WithDRAResourcesForClaim(dra.PodClaimName, cpu, mem)
+}
+
+// WithDRAResourcesForClaim adds CPU and memory request references under the
+// supplied local PodResourceClaim name. The default remains the synthesized
+// vmi-dra claim; manual all-resource claims can select their own name.
+func WithDRAResourcesForClaim(claimName string, cpu, mem bool) ResourceRendererOption {
 	return func(r *ResourceRenderer) {
 		if cpu {
 			r.resourceClaims = append(r.resourceClaims, k8sv1.ResourceClaim{
-				Name:    dra.PodClaimName,
+				Name:    claimName,
 				Request: dra.CPURequestName,
 			})
 		}
 		if mem {
 			r.resourceClaims = append(r.resourceClaims, k8sv1.ResourceClaim{
-				Name:    dra.PodClaimName,
+				Name:    claimName,
 				Request: dra.MemoryRequestName,
 			})
 		}
