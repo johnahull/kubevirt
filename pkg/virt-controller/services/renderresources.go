@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	v1 "kubevirt.io/api/core/v1"
 
+	"kubevirt.io/kubevirt/pkg/dra"
 	netvmispec "kubevirt.io/kubevirt/pkg/network/vmispec"
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/hardware"
@@ -125,6 +126,21 @@ func getIOThreadsCount(vmi *v1.VirtualMachineInstance) int64 {
 	return int64(*vmi.Spec.Domain.IOThreads.SupplementalPoolThreadCount)
 }
 
+// SupplementalPoolIOThreadCPUs returns the "additionalCPUs" adjustment HostCPUs
+// and WithCPUPinning use for their even-parity emulator-thread rounding. It is
+// exported so callers outside this package (e.g. the CPU DRA claim creation
+// in watch/vmi) can call HostCPUs with the exact same inputs the pod render
+// path uses, keeping the claim size and the mirrored pod resources in sync.
+func SupplementalPoolIOThreadCPUs(vmi *v1.VirtualMachineInstance) uint32 {
+	if vmi.Spec.Domain.IOThreadsPolicy != nil &&
+		*vmi.Spec.Domain.IOThreadsPolicy == v1.IOThreadsPolicySupplementalPool &&
+		vmi.Spec.Domain.IOThreads != nil &&
+		vmi.Spec.Domain.IOThreads.SupplementalPoolThreadCount != nil {
+		return *vmi.Spec.Domain.IOThreads.SupplementalPoolThreadCount
+	}
+	return 0
+}
+
 func WithoutDedicatedCPU(vmi *v1.VirtualMachineInstance, cpuAllocationRatio int, withCPULimits bool) ResourceRendererOption {
 	return func(renderer *ResourceRenderer) {
 		cpu := vmi.Spec.Domain.CPU
@@ -214,6 +230,19 @@ func WithNetworksDRA(networks []v1.Network) ResourceRendererOption {
 				r.resourceClaims = append(r.resourceClaims, claim)
 			}
 		}
+	}
+}
+
+// WithCPUDRA adds a container-level ResourceClaim reference for the
+// synthesized CPU claim (VEP #152). The claim itself is created out-of-band
+// by virt-controller before the pod is rendered; this only wires the
+// container up to consume it.
+func WithCPUDRA() ResourceRendererOption {
+	return func(r *ResourceRenderer) {
+		r.resourceClaims = append(r.resourceClaims, k8sv1.ResourceClaim{
+			Name:    dra.CPUPodClaimName,
+			Request: dra.CPURequestName,
+		})
 	}
 }
 
@@ -317,16 +346,49 @@ func WithAutoMemoryLimits(namespace string, namespaceStore cache.Store) Resource
 	}
 }
 
+// HostCPUs returns the total number of exclusive host CPUs a VMI needs:
+// guest vCPUs (cores x sockets x threads), IO-thread supplemental pool CPUs,
+// and (if isolateEmulatorThread is set) 1 or 2 emulator thread CPUs. This is
+// the "CPU accounting" formula from VEP #152. Both the kubelet CPU Manager
+// pod-resources path (WithCPUPinning below) and the CPU DRA claim synthesis
+// (dra.NewCPUResourceClaim) size themselves from this single calculation so
+// the mirrored pod resources and the claim size cannot drift apart.
+//
+// This only covers the case hardware.GetNumberOfVCPUs(cpu) != 0. VMIs with
+// dedicatedCpuPlacement but no CPU topology at all fall back to whatever
+// resources.requests.cpu the user already set (see WithCPUPinning's vcpus==0
+// branch); that fallback is out of scope for CPU DRA, which VEP #152 always
+// sizes from cpu.cores/sockets/threads.
+func HostCPUs(vmi *v1.VirtualMachineInstance, annotations map[string]string, additionalCPUs uint32) int64 {
+	cpu := vmi.Spec.Domain.CPU
+	totalCPUs := hardware.GetNumberOfVCPUs(cpu) + getIOThreadsCount(vmi)
+
+	if cpu.IsolateEmulatorThread {
+		emulatorThreadCPUs := int64(1)
+		_, emulatorThreadCompleteToEvenParityAnnotationExists := annotations[v1.EmulatorThreadCompleteToEvenParity]
+		if emulatorThreadCompleteToEvenParityAnnotationExists &&
+			(totalCPUs+int64(additionalCPUs))%2 == 0 {
+			emulatorThreadCPUs = 2
+		}
+		totalCPUs += emulatorThreadCPUs
+	}
+
+	return totalCPUs
+}
+
 func WithCPUPinning(vmi *v1.VirtualMachineInstance, annotations map[string]string, additionalCPUs uint32) ResourceRendererOption {
 	return func(renderer *ResourceRenderer) {
 		cpu := vmi.Spec.Domain.CPU
 		vcpus := hardware.GetNumberOfVCPUs(cpu)
-		ioThreadCPUs := getIOThreadsCount(vmi)
+
 		if vcpus != 0 {
-			totalCPUs := vcpus + ioThreadCPUs
+			totalCPUs := HostCPUs(vmi, annotations, additionalCPUs)
 			renderer.vmLimits[k8sv1.ResourceCPU] = *resource.NewQuantity(totalCPUs, resource.BinarySI)
 			renderer.vmRequests[k8sv1.ResourceCPU] = *resource.NewQuantity(totalCPUs, resource.BinarySI) // Ensure requests match limits for dedicated CPUs
 		} else {
+			// No CPU topology at all: fall back to whatever resources.requests/limits.cpu
+			// the user already set, plus IO thread CPUs. HostCPUs does not cover this case.
+			ioThreadCPUs := getIOThreadsCount(vmi)
 			ioThreadsCount := resource.NewQuantity(ioThreadCPUs, resource.BinarySI)
 			if cpuLimit, ok := renderer.vmLimits[k8sv1.ResourceCPU]; ok {
 				cpuLimit.Add(*ioThreadsCount)
@@ -336,21 +398,21 @@ func WithCPUPinning(vmi *v1.VirtualMachineInstance, annotations map[string]strin
 				cpuRequest.Add(*ioThreadsCount)
 				renderer.vmRequests[k8sv1.ResourceCPU] = cpuRequest
 			}
-		}
 
-		if cpu.IsolateEmulatorThread {
-			emulatorThreadCPUs := resource.NewQuantity(1, resource.BinarySI)
-			limits := renderer.vmLimits[k8sv1.ResourceCPU]
-			_, emulatorThreadCompleteToEvenParityAnnotationExists := annotations[v1.EmulatorThreadCompleteToEvenParity]
-			if emulatorThreadCompleteToEvenParityAnnotationExists &&
-				(limits.Value()+int64(additionalCPUs))%2 == 0 {
-				emulatorThreadCPUs = resource.NewQuantity(2, resource.BinarySI)
-			}
-			limits.Add(*emulatorThreadCPUs)
-			renderer.vmLimits[k8sv1.ResourceCPU] = limits
-			if cpuRequest, ok := renderer.vmRequests[k8sv1.ResourceCPU]; ok {
-				cpuRequest.Add(*emulatorThreadCPUs)
-				renderer.vmRequests[k8sv1.ResourceCPU] = cpuRequest
+			if cpu.IsolateEmulatorThread {
+				emulatorThreadCPUs := resource.NewQuantity(1, resource.BinarySI)
+				limits := renderer.vmLimits[k8sv1.ResourceCPU]
+				_, emulatorThreadCompleteToEvenParityAnnotationExists := annotations[v1.EmulatorThreadCompleteToEvenParity]
+				if emulatorThreadCompleteToEvenParityAnnotationExists &&
+					(limits.Value()+int64(additionalCPUs))%2 == 0 {
+					emulatorThreadCPUs = resource.NewQuantity(2, resource.BinarySI)
+				}
+				limits.Add(*emulatorThreadCPUs)
+				renderer.vmLimits[k8sv1.ResourceCPU] = limits
+				if cpuRequest, ok := renderer.vmRequests[k8sv1.ResourceCPU]; ok {
+					cpuRequest.Add(*emulatorThreadCPUs)
+					renderer.vmRequests[k8sv1.ResourceCPU] = cpuRequest
+				}
 			}
 		}
 

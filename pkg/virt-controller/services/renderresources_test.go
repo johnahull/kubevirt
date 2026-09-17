@@ -174,6 +174,32 @@ var _ = Describe("Resource pod spec renderer", func() {
 		})
 	})
 
+	Context("HostCPUs", func() {
+		DescribeTable("computes the same total WithCPUPinning uses, so a CPU DRA claim cannot drift from the mirrored pod resources",
+			func(cores uint32, ioThreads uint32, isolateEmulatorThread bool, annotations map[string]string, additionalCPUs uint32, expected int64) {
+				opts := []libvmi.Option{
+					libvmi.WithCPUCount(cores, 0, 0),
+					libvmi.WithIOThreadsPolicy(v1.IOThreadsPolicySupplementalPool),
+					libvmi.WithSupplementalPoolThreadCount(ioThreads),
+				}
+				if isolateEmulatorThread {
+					opts = append(opts, libvmi.WithIsolateEmulatorThread())
+				}
+				vmi := libvmi.New(opts...)
+
+				Expect(HostCPUs(vmi, annotations, additionalCPUs)).To(Equal(expected))
+			},
+			Entry("guest vCPUs + IO threads, no emulator thread",
+				uint32(8), uint32(2), false, nil, uint32(0), int64(10)),
+			Entry("guest vCPUs + IO threads + 1 emulator thread CPU",
+				uint32(8), uint32(2), true, nil, uint32(0), int64(11)),
+			Entry("even-parity annotation bumps emulator thread to 2 CPUs on an even total",
+				uint32(6), uint32(2), true, map[string]string{v1.EmulatorThreadCompleteToEvenParity: ""}, uint32(0), int64(10)),
+			Entry("even-parity annotation leaves emulator thread at 1 CPU on an odd total",
+				uint32(5), uint32(2), true, map[string]string{v1.EmulatorThreadCompleteToEvenParity: ""}, uint32(0), int64(8)),
+		)
+	})
+
 	When("an isolated emulator thread is requested", func() {
 		DescribeTable("sets limits and requests to vCPUs + iothreads + emulatorThreadCPUs when vCPUs != 0",
 			func(vcpus uint32, ioThreads uint32, userSpecifiedCPULimit, userSpecifiedCPURequest *resource.Quantity, annotations map[string]string, expectedCPUs int64) {
@@ -447,6 +473,15 @@ var _ = Describe("Resource pod spec renderer", func() {
 			Expect(claims).To(HaveLen(1))
 			Expect(claims[0].Name).To(Equal("net-claim"))
 			Expect(claims[0].Request).To(Equal("net-request"))
+		})
+
+		It("should add the synthesized CPU DRA claim reference", func() {
+			rr = NewResourceRenderer(nil, nil, WithCPUDRA())
+
+			claims := rr.Claims()
+			Expect(claims).To(Equal([]kubev1.ResourceClaim{
+				{Name: "cpu-dra", Request: "cpu"},
+			}))
 		})
 
 		It("Unified functions should not interfere with other renderer options", func() {

@@ -228,6 +228,57 @@ var _ = Describe("Template", func() {
 			})
 		})
 
+		Context("DRA CPU resource claims", func() {
+			const (
+				computeContainerName = "compute"
+				vmiName              = "testvmi"
+			)
+
+			newDedicatedCPUVMI := func(name string) *v1.VirtualMachineInstance {
+				vmi := api.NewMinimalVMI(name)
+				vmi.Spec.Domain.CPU = &v1.CPU{
+					Cores:                 4,
+					DedicatedCPUPlacement: true,
+				}
+				return vmi
+			}
+
+			It("should add the CPU DRA claim to the compute container and pod.spec.resourceClaims when the feature gate is enabled", func() {
+				config, kvStore, svc = configFactory(defaultArch)
+				enableFeatureGate(featuregate.CPUsWithDRAGate)
+
+				vmi := newDedicatedCPUVMI(vmiName)
+				pod, err := svc.RenderLaunchManifest(vmi)
+				Expect(err).ToNot(HaveOccurred())
+
+				containers := pod.Spec.Containers
+				Expect(containers[0].Name).To(Equal(computeContainerName))
+				Expect(containers[0].Resources.Claims).To(ContainElement(k8sv1.ResourceClaim{Name: "cpu-dra", Request: "cpu"}))
+
+				Expect(pod.Spec.ResourceClaims).To(ContainElement(k8sv1.PodResourceClaim{
+					Name:              "cpu-dra",
+					ResourceClaimName: ptr.To(vmiName + "-cpu"),
+				}))
+
+				// The DRA node never runs kubelet CPU Manager, so the pod must
+				// not be pinned to kubevirt.io/cpumanager nodes.
+				Expect(pod.Spec.NodeSelector).ToNot(HaveKey(v1.CPUManager))
+			})
+
+			It("should not add the CPU DRA claim when the feature gate is disabled, and should use the kubelet CPU Manager node selector instead", func() {
+				config, _, svc = configFactory(defaultArch)
+
+				vmi := newDedicatedCPUVMI(vmiName)
+				pod, err := svc.RenderLaunchManifest(vmi)
+				Expect(err).ToNot(HaveOccurred())
+
+				containers := pod.Spec.Containers
+				Expect(containers[0].Resources.Claims).To(BeEmpty())
+				Expect(pod.Spec.ResourceClaims).To(BeEmpty())
+				Expect(pod.Spec.NodeSelector).To(HaveKeyWithValue(v1.CPUManager, "true"))
+			})
+		})
+
 		Context("Use emulation", func() {
 			const (
 				testNamespace        = "default"

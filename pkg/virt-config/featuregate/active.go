@@ -108,6 +108,14 @@ const (
 	// resources to be attached to VMs using the natural networks API.
 	NetworkDevicesWithDRAGate = "NetworkDevicesWithDRA"
 
+	// Owner: sig-compute
+	// Alpha: v1.10.0
+	//
+	// CPUsWithDRAGate allows virt-controller to synthesize a DRA ResourceClaim for VMIs
+	// requesting dedicatedCpuPlacement, so exclusive CPUs are allocated through an external
+	// CPU DRA driver instead of kubelet CPU Manager.
+	CPUsWithDRAGate = "CPUsWithDRA"
+
 	// Owner: sig-compute / @awels
 	// Alpha: v1.6.0
 	// Beta: v1.10.0
@@ -291,6 +299,7 @@ func init() {
 	RegisterFeatureGate(FeatureGate{Name: HostDevicesWithDRAGate, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: PCINUMAAwareTopologyEnabled, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: NetworkDevicesWithDRAGate, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: CPUsWithDRAGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: DecentralizedLiveMigration, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: DeclarativeHotplugVolumesGate, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: ObjectGraph, State: Alpha})

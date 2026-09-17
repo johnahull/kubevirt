@@ -148,6 +148,10 @@ func (c *Controller) sync(vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod, da
 			return common.NewSyncError(err, virtv1.ContainerPathVolumesDisabledReason), pod
 		}
 
+		if syncErr := c.handleCPUDRAClaim(vmi); syncErr != nil {
+			return syncErr, pod
+		}
+
 		var templatePod *k8sv1.Pod
 		if isWaitForFirstConsumer {
 			log.Log.V(3).Object(vmi).Infof("Scheduling temporary pod for WaitForFirstConsumer DV")

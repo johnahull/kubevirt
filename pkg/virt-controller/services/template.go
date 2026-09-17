@@ -684,6 +684,16 @@ func (t *TemplateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 		}
 
 	}
+
+	podResourceClaims := drautil.ToPodResourceClaims(vmi.Spec.ResourceClaims)
+	if drautil.UsesCPUDRA(t.clusterConfig, vmi) {
+		claimName := drautil.CPUClaimName(vmi)
+		podResourceClaims = append(podResourceClaims, k8sv1.PodResourceClaim{
+			Name:              drautil.CPUPodClaimName,
+			ResourceClaimName: &claimName,
+		})
+	}
+
 	pod := k8sv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "virt-launcher-" + domain + "-",
@@ -711,7 +721,7 @@ func (t *TemplateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 			SchedulerName:                 vmi.Spec.SchedulerName,
 			Tolerations:                   vmi.Spec.Tolerations,
 			TopologySpreadConstraints:     vmi.Spec.TopologySpreadConstraints,
-			ResourceClaims:                drautil.ToPodResourceClaims(vmi.Spec.ResourceClaims),
+			ResourceClaims:                podResourceClaims,
 		},
 	}
 
@@ -768,7 +778,11 @@ func (t *TemplateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 
 func (t *TemplateService) newNodeSelectorRenderer(vmi *v1.VirtualMachineInstance) *NodeSelectorRenderer {
 	var opts []NodeSelectorRendererOption
-	if vmi.IsCPUDedicated() {
+	// A CPU DRA node runs the external CPU DRA driver with kubelet CPU Manager
+	// disabled (cpuManagerPolicy: none), so it never carries the
+	// kubevirt.io/cpumanager label. Selecting on that label would pin these
+	// pods to exactly the nodes that cannot serve them.
+	if vmi.IsCPUDedicated() && !drautil.UsesCPUDRA(t.clusterConfig, vmi) {
 		opts = append(opts, WithDedicatedCPU())
 	}
 	if t.clusterConfig.HypervStrictCheckEnabled() {
@@ -1621,13 +1635,7 @@ func (t *TemplateService) doesVMIRequireAutoCPULimits(vmi *v1.VirtualMachineInst
 
 func (t *TemplateService) VMIResourcePredicates(vmi *v1.VirtualMachineInstance, memoryOverhead resource.Quantity) VMIResourcePredicates {
 	withCPULimits := t.doesVMIRequireAutoCPULimits(vmi)
-	additionalCPUs := uint32(0)
-	if vmi.Spec.Domain.IOThreadsPolicy != nil &&
-		*vmi.Spec.Domain.IOThreadsPolicy == v1.IOThreadsPolicySupplementalPool &&
-		vmi.Spec.Domain.IOThreads != nil &&
-		vmi.Spec.Domain.IOThreads.SupplementalPoolThreadCount != nil {
-		additionalCPUs = *vmi.Spec.Domain.IOThreads.SupplementalPoolThreadCount
-	}
+	additionalCPUs := SupplementalPoolIOThreadCPUs(vmi)
 	return VMIResourcePredicates{
 		vmi: vmi,
 		resourceRules: []VMIResourceRule{
@@ -1635,6 +1643,9 @@ func (t *TemplateService) VMIResourcePredicates(vmi *v1.VirtualMachineInstance, 
 			NewVMIResourceRule(emptyMemoryRequest, WithMemoryRequests(vmi.Spec.Domain.Memory, t.clusterConfig.GetMemoryOvercommit())),
 			NewVMIResourceRule(doesVMIRequireDedicatedCPU, WithCPUPinning(vmi, vmi.Annotations, additionalCPUs)),
 			NewVMIResourceRule(not(doesVMIRequireDedicatedCPU), WithoutDedicatedCPU(vmi, t.clusterConfig.GetCPUAllocationRatio(), withCPULimits)),
+			NewVMIResourceRule(func(vmi *v1.VirtualMachineInstance) bool {
+				return drautil.UsesCPUDRA(t.clusterConfig, vmi)
+			}, WithCPUDRA()),
 			NewVMIResourceRule(hasHugePages, WithHugePages(vmi.Spec.Domain.Memory, memoryOverhead)),
 			NewVMIResourceRule(not(hasHugePages), WithMemoryOverhead(vmi.Spec.Domain.Resources, memoryOverhead)),
 			NewVMIResourceRule(t.doesVMIRequireAutoMemoryLimits, WithAutoMemoryLimits(vmi.Namespace, t.namespaceStore)),

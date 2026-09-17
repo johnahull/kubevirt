@@ -167,10 +167,15 @@ func (config *ClusterConfig) NetworkDevicesWithDRAGateEnabled() bool {
 	return config.isFeatureGateEnabled(featuregate.NetworkDevicesWithDRAGate)
 }
 
+func (config *ClusterConfig) CPUsWithDRAEnabled() bool {
+	return config.isFeatureGateEnabled(featuregate.CPUsWithDRAGate)
+}
+
 func (config *ClusterConfig) AnyDeviceDRAGateEnabled() bool {
 	return config.GPUsWithDRAGateEnabled() ||
 		config.HostDevicesWithDRAEnabled() ||
-		config.NetworkDevicesWithDRAGateEnabled()
+		config.NetworkDevicesWithDRAGateEnabled() ||
+		config.CPUsWithDRAEnabled()
 }
 
 func (config *ClusterConfig) PortRangesSpecGateEnabled() bool {

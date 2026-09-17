@@ -608,6 +608,19 @@ func newControllerClusterRole() *rbacv1.ClusterRole {
 					"get",
 				},
 			},
+			{
+				// VEP #152: virt-controller synthesizes a CPU ResourceClaim
+				// per dedicated-CPU VMI when CPUsWithDRA is enabled.
+				APIGroups: []string{
+					"resource.k8s.io",
+				},
+				Resources: []string{
+					"resourceclaims",
+				},
+				Verbs: []string{
+					"create",
+				},
+			},
 		},
 	}
 }
