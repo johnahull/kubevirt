@@ -60,6 +60,12 @@ const (
 	MDevUUIDAttribute = resourcev1.QualifiedName("mdevUUID")
 	// PCIeRootAttribute is the standard attribute for PCIe root complex identifier
 	PCIeRootAttribute = resourcev1.QualifiedName("resource.kubernetes.io/pcieRoot")
+	// NUMANodeAttribute is the standard attribute for a device's NUMA node.
+	// Published by both dra-driver-cpu and dra-driver-memory via the shared
+	// k8s.io/dynamic-resource-allocation/deviceattribute helper, which makes
+	// it usable as a cross-driver DeviceConstraint.MatchAttribute to align a
+	// CPU request and a memory/hugepages request onto the same NUMA node.
+	NUMANodeAttribute = resourcev1.QualifiedName("resource.kubernetes.io/numaNode")
 )
 
 // APIVersionV1Alpha1 is the JSON apiVersion string for KEP-5304 DRA device
@@ -67,7 +73,14 @@ const (
 // types once KEP-5304 lands in kubernetes (see TODO in kubevirt.io/kubevirt/pkg/dra).
 const APIVersionV1Alpha1 = "metadata.resource.k8s.io/v1alpha1"
 
+// APIVersionV1Beta1 is the JSON apiVersion string for the v1beta1 KEP-5304
+// metadata API. Field-for-field identical payload to v1alpha1 (only the
+// group/version string changed upstream); dra-driver-cpu and
+// dra-driver-memory both write this version.
+const APIVersionV1Beta1 = "metadata.resource.k8s.io/v1beta1"
+
 var supportedAPIVersions = map[string]bool{
+	APIVersionV1Beta1:  true,
 	APIVersionV1Alpha1: true,
 }
 

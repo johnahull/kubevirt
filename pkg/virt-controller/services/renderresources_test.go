@@ -476,11 +476,30 @@ var _ = Describe("Resource pod spec renderer", func() {
 		})
 
 		It("should add the synthesized CPU DRA claim reference", func() {
-			rr = NewResourceRenderer(nil, nil, WithCPUDRA())
+			rr = NewResourceRenderer(nil, nil, WithDRAResources(true, false))
 
 			claims := rr.Claims()
 			Expect(claims).To(Equal([]kubev1.ResourceClaim{
-				{Name: "cpu-dra", Request: "cpu"},
+				{Name: "vmi-dra", Request: "cpu"},
+			}))
+		})
+
+		It("should add the synthesized memory DRA claim reference", func() {
+			rr = NewResourceRenderer(nil, nil, WithDRAResources(false, true))
+
+			claims := rr.Claims()
+			Expect(claims).To(Equal([]kubev1.ResourceClaim{
+				{Name: "vmi-dra", Request: "mem"},
+			}))
+		})
+
+		It("should add both synthesized DRA claim references when CPU and memory DRA are both used", func() {
+			rr = NewResourceRenderer(nil, nil, WithDRAResources(true, true))
+
+			claims := rr.Claims()
+			Expect(claims).To(Equal([]kubev1.ResourceClaim{
+				{Name: "vmi-dra", Request: "cpu"},
+				{Name: "vmi-dra", Request: "mem"},
 			}))
 		})
 

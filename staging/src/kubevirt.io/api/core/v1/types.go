@@ -1449,6 +1449,14 @@ const (
 	// EmulatorThreadCompleteToEvenParity alpha annotation will cause Kubevirt to complete the VMI's CPU count to an even parity when IsolateEmulatorThread options are requested
 	EmulatorThreadCompleteToEvenParity string = "alpha.kubevirt.io/EmulatorThreadCompleteToEvenParity"
 
+	// UsesDRAResourcesAnnotation is set by virt-controller on VMIs for which it
+	// synthesized a CPU and/or memory DRA ResourceClaim (VEP #152 + memory
+	// DRA). virt-launcher has no cluster-config/feature-gate access, so this
+	// annotation (delivered to virt-launcher as part of the VMI object it
+	// already receives) is how it learns a DRA claim exists, as distinct from
+	// the classic non-DRA dedicatedCpuPlacement path which never sets it.
+	UsesDRAResourcesAnnotation string = "kubevirt.io/uses-dra-resources"
+
 	// VolumesUpdateMigration indicates that the migration copies and update
 	// the volumes
 	VolumesUpdateMigration string = "kubevirt.io/volume-update-migration"

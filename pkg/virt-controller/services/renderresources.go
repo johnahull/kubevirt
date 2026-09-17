@@ -233,17 +233,41 @@ func WithNetworksDRA(networks []v1.Network) ResourceRendererOption {
 	}
 }
 
-// WithCPUDRA adds a container-level ResourceClaim reference for the
-// synthesized CPU claim (VEP #152). The claim itself is created out-of-band
-// by virt-controller before the pod is rendered; this only wires the
-// container up to consume it.
-func WithCPUDRA() ResourceRendererOption {
+// WithDRAResources adds container-level ResourceClaim references for the
+// synthesized CPU/memory claim (VEP #152 + memory DRA). The claim itself is
+// created out-of-band by virt-controller before the pod is rendered; this
+// only wires the container up to consume it. cpu and mem independently
+// control whether each request is referenced, since a VMI may use CPU DRA,
+// memory DRA, or both.
+func WithDRAResources(cpu, mem bool) ResourceRendererOption {
 	return func(r *ResourceRenderer) {
-		r.resourceClaims = append(r.resourceClaims, k8sv1.ResourceClaim{
-			Name:    dra.CPUPodClaimName,
-			Request: dra.CPURequestName,
-		})
+		if cpu {
+			r.resourceClaims = append(r.resourceClaims, k8sv1.ResourceClaim{
+				Name:    dra.PodClaimName,
+				Request: dra.CPURequestName,
+			})
+		}
+		if mem {
+			r.resourceClaims = append(r.resourceClaims, k8sv1.ResourceClaim{
+				Name:    dra.PodClaimName,
+				Request: dra.MemoryRequestName,
+			})
+		}
 	}
+}
+
+// HugepagesMemorySize returns the amount of guest memory hugepages must back:
+// the VMI's requested memory, clamped to vmi.Spec.Domain.Memory.Guest when
+// that's lower. Both the classic pod-resource hugepages sizing
+// (WithHugePages below) and DRA memory claim sizing (dra.NewResourcesClaim)
+// use this single calculation so they cannot drift.
+func HugepagesMemorySize(vmi *v1.VirtualMachineInstance) resource.Quantity {
+	memReq := vmi.Spec.Domain.Resources.Requests.Memory()
+	vmMemory := vmi.Spec.Domain.Memory
+	if vmMemory != nil && vmMemory.Guest != nil && memReq.Value() > vmMemory.Guest.Value() {
+		return *vmMemory.Guest
+	}
+	return *memReq
 }
 
 func WithHugePages(vmMemory *v1.Memory, memoryOverhead resource.Quantity) ResourceRendererOption {

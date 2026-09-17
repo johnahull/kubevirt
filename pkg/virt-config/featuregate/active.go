@@ -116,6 +116,15 @@ const (
 	// CPU DRA driver instead of kubelet CPU Manager.
 	CPUsWithDRAGate = "CPUsWithDRA"
 
+	// Owner: sig-compute
+	// Alpha: v1.10.0
+	//
+	// MemoryWithDRAGate allows virt-controller to synthesize a DRA DeviceRequest for VMIs
+	// requesting hugepages, so guest memory is allocated through an external memory DRA
+	// driver instead of kubelet's hugepages management. When combined with CPUsWithDRA,
+	// the CPU and memory requests are aligned to the same host NUMA node.
+	MemoryWithDRAGate = "MemoryWithDRA"
+
 	// Owner: sig-compute / @awels
 	// Alpha: v1.6.0
 	// Beta: v1.10.0
@@ -300,6 +309,7 @@ func init() {
 	RegisterFeatureGate(FeatureGate{Name: PCINUMAAwareTopologyEnabled, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: NetworkDevicesWithDRAGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: CPUsWithDRAGate, State: Alpha})
+	RegisterFeatureGate(FeatureGate{Name: MemoryWithDRAGate, State: Alpha})
 	RegisterFeatureGate(FeatureGate{Name: DecentralizedLiveMigration, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: DeclarativeHotplugVolumesGate, State: Beta})
 	RegisterFeatureGate(FeatureGate{Name: ObjectGraph, State: Alpha})

@@ -148,7 +148,7 @@ func (c *Controller) sync(vmi *virtv1.VirtualMachineInstance, pod *k8sv1.Pod, da
 			return common.NewSyncError(err, virtv1.ContainerPathVolumesDisabledReason), pod
 		}
 
-		if syncErr := c.handleCPUDRAClaim(vmi); syncErr != nil {
+		if syncErr := c.handleDRAResourcesClaim(vmi); syncErr != nil {
 			return syncErr, pod
 		}
 

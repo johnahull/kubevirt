@@ -253,11 +253,11 @@ var _ = Describe("Template", func() {
 
 				containers := pod.Spec.Containers
 				Expect(containers[0].Name).To(Equal(computeContainerName))
-				Expect(containers[0].Resources.Claims).To(ContainElement(k8sv1.ResourceClaim{Name: "cpu-dra", Request: "cpu"}))
+				Expect(containers[0].Resources.Claims).To(ContainElement(k8sv1.ResourceClaim{Name: "vmi-dra", Request: "cpu"}))
 
 				Expect(pod.Spec.ResourceClaims).To(ContainElement(k8sv1.PodResourceClaim{
-					Name:              "cpu-dra",
-					ResourceClaimName: ptr.To(vmiName + "-cpu"),
+					Name:              "vmi-dra",
+					ResourceClaimName: ptr.To(vmiName + "-dra"),
 				}))
 
 				// The DRA node never runs kubelet CPU Manager, so the pod must
@@ -276,6 +276,33 @@ var _ = Describe("Template", func() {
 				Expect(containers[0].Resources.Claims).To(BeEmpty())
 				Expect(pod.Spec.ResourceClaims).To(BeEmpty())
 				Expect(pod.Spec.NodeSelector).To(HaveKeyWithValue(v1.CPUManager, "true"))
+			})
+
+			It("should add both CPU and memory DRA claims under the same pod-claim name when both feature gates are enabled", func() {
+				config, kvStore, svc = configFactory(defaultArch)
+				enableFeatureGate(featuregate.CPUsWithDRAGate)
+				kvConfig := kv.DeepCopy()
+				kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{featuregate.CPUsWithDRAGate, featuregate.MemoryWithDRAGate}
+				testutils.UpdateFakeKubeVirtClusterConfig(kvStore, kvConfig)
+
+				vmi := newDedicatedCPUVMI(vmiName)
+				vmi.Spec.Domain.Memory = &v1.Memory{Hugepages: &v1.Hugepages{PageSize: "1Gi"}}
+				pod, err := svc.RenderLaunchManifest(vmi)
+				Expect(err).ToNot(HaveOccurred())
+
+				containers := pod.Spec.Containers
+				Expect(containers[0].Resources.Claims).To(ContainElements(
+					k8sv1.ResourceClaim{Name: "vmi-dra", Request: "cpu"},
+					k8sv1.ResourceClaim{Name: "vmi-dra", Request: "mem"},
+				))
+				Expect(pod.Spec.ResourceClaims).To(ContainElement(k8sv1.PodResourceClaim{
+					Name:              "vmi-dra",
+					ResourceClaimName: ptr.To(vmiName + "-dra"),
+				}))
+
+				// The classic hugepages-* pod resource is skipped for the
+				// memory-DRA path: dra-driver-memory owns that accounting.
+				Expect(containers[0].Resources.Requests).ToNot(HaveKey(k8sv1.ResourceName(k8sv1.ResourceHugePagesPrefix + "1Gi")))
 			})
 		})
 

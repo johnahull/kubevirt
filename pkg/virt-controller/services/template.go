@@ -686,10 +686,10 @@ func (t *TemplateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, i
 	}
 
 	podResourceClaims := drautil.ToPodResourceClaims(vmi.Spec.ResourceClaims)
-	if drautil.UsesCPUDRA(t.clusterConfig, vmi) {
-		claimName := drautil.CPUClaimName(vmi)
+	if drautil.UsesCPUDRA(t.clusterConfig, vmi) || drautil.UsesMemoryDRA(t.clusterConfig, vmi) {
+		claimName := drautil.ResourcesClaimName(vmi)
 		podResourceClaims = append(podResourceClaims, k8sv1.PodResourceClaim{
-			Name:              drautil.CPUPodClaimName,
+			Name:              drautil.PodClaimName,
 			ResourceClaimName: &claimName,
 		})
 	}
@@ -1636,6 +1636,8 @@ func (t *TemplateService) doesVMIRequireAutoCPULimits(vmi *v1.VirtualMachineInst
 func (t *TemplateService) VMIResourcePredicates(vmi *v1.VirtualMachineInstance, memoryOverhead resource.Quantity) VMIResourcePredicates {
 	withCPULimits := t.doesVMIRequireAutoCPULimits(vmi)
 	additionalCPUs := SupplementalPoolIOThreadCPUs(vmi)
+	usesCPUDRA := drautil.UsesCPUDRA(t.clusterConfig, vmi)
+	usesMemoryDRA := drautil.UsesMemoryDRA(t.clusterConfig, vmi)
 	return VMIResourcePredicates{
 		vmi: vmi,
 		resourceRules: []VMIResourceRule{
@@ -1644,10 +1646,21 @@ func (t *TemplateService) VMIResourcePredicates(vmi *v1.VirtualMachineInstance, 
 			NewVMIResourceRule(doesVMIRequireDedicatedCPU, WithCPUPinning(vmi, vmi.Annotations, additionalCPUs)),
 			NewVMIResourceRule(not(doesVMIRequireDedicatedCPU), WithoutDedicatedCPU(vmi, t.clusterConfig.GetCPUAllocationRatio(), withCPULimits)),
 			NewVMIResourceRule(func(vmi *v1.VirtualMachineInstance) bool {
-				return drautil.UsesCPUDRA(t.clusterConfig, vmi)
-			}, WithCPUDRA()),
-			NewVMIResourceRule(hasHugePages, WithHugePages(vmi.Spec.Domain.Memory, memoryOverhead)),
-			NewVMIResourceRule(not(hasHugePages), WithMemoryOverhead(vmi.Spec.Domain.Resources, memoryOverhead)),
+				return usesCPUDRA || usesMemoryDRA
+			}, WithDRAResources(usesCPUDRA, usesMemoryDRA)),
+			// When memory DRA is in play, hugepages allocation is owned by the
+			// DRA driver (its NRI plugin sets hugetlb cgroup limits directly),
+			// so mirroring the classic hugepages-* pod resource would
+			// double-book against a driver that already assumes it owns that
+			// accounting. WithMemoryOverhead takes over the QEMU/virtualization
+			// overhead accounting that WithHugePages would otherwise fold into
+			// resources.requests/limits.memory, so that accounting isn't lost.
+			NewVMIResourceRule(func(vmi *v1.VirtualMachineInstance) bool {
+				return hasHugePages(vmi) && !usesMemoryDRA
+			}, WithHugePages(vmi.Spec.Domain.Memory, memoryOverhead)),
+			NewVMIResourceRule(func(vmi *v1.VirtualMachineInstance) bool {
+				return !hasHugePages(vmi) || usesMemoryDRA
+			}, WithMemoryOverhead(vmi.Spec.Domain.Resources, memoryOverhead)),
 			NewVMIResourceRule(t.doesVMIRequireAutoMemoryLimits, WithAutoMemoryLimits(vmi.Namespace, t.namespaceStore)),
 			NewVMIResourceRule(isGPUVMIDevicePlugins, WithGPUsDevicePlugins(vmi.Spec.Domain.Devices.GPUs)),
 			NewVMIResourceRule(func(vmi *v1.VirtualMachineInstance) bool {

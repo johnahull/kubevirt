@@ -326,9 +326,19 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 	}
 
 	if vmi.Spec.Domain.CPU != nil {
+		// len(vmi.Spec.ResourceClaims) > 0 covers user-authored GPU/HostDevice/
+		// Network DRA claims. It does not cover the CPU/memory DRA claim
+		// virt-controller synthesizes (VEP #152 + memory DRA), which is
+		// deliberately not added to vmi.Spec.ResourceClaims. virt-launcher has
+		// no cluster-config access to recompute that itself, so virt-controller
+		// signals it via UsesDRAResourcesAnnotation instead. Note
+		// vmi.IsCPUDedicated() alone is NOT a valid substitute here: it is also
+		// true for the classic, non-DRA, kubelet-CPU-Manager dedicated-CPU path,
+		// which never has KEP-5304 metadata to build guest NUMA cells from.
+		_, usesDRAResources := vmi.Annotations[v1.UsesDRAResourcesAnnotation]
 		hasDRAGuestMapping := vmi.Spec.Domain.CPU.NUMA != nil &&
 			vmi.Spec.Domain.CPU.NUMA.GuestMappingPassthrough != nil &&
-			len(vmi.Spec.ResourceClaims) > 0
+			(len(vmi.Spec.ResourceClaims) > 0 || usesDRAResources)
 
 		if vmi.IsCPUDedicated() && hasDRAGuestMapping {
 			if graceIOVirtualizationRequested(c) {
