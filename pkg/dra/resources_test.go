@@ -127,7 +127,7 @@ var _ = Describe("Resources DRA", func() {
 	Context("NewResourcesClaim", func() {
 		It("builds a CPU-only claim shape identical in intent to the pre-rework CPU-only claim: single request, no constraint", func() {
 			vmi := newVMI(true, "")
-			claim := NewResourcesClaim(vmi, 10, nil, "")
+			claim := NewResourcesClaim(vmi, true, 10, nil, "")
 
 			Expect(claim.Name).To(Equal("vmi-with-dra-dra"))
 			Expect(claim.Namespace).To(Equal("default"))
@@ -153,10 +153,29 @@ var _ = Describe("Resources DRA", func() {
 			Expect(claim.Spec.Devices.Constraints).To(BeEmpty())
 		})
 
+		It("builds a memory-only claim with no cpu request when usesCPUDRA is false", func() {
+			vmi := newVMI(false, "1Gi")
+			memSize := resource.MustParse("4Gi")
+			claim := NewResourcesClaim(vmi, false, 0, &memSize, "dra.hugepages-1g")
+
+			Expect(claim.Spec.Devices.Requests).To(HaveLen(1))
+			request := claim.Spec.Devices.Requests[0]
+			Expect(request.Name).To(Equal(MemoryRequestName))
+			Expect(request.Exactly.DeviceClassName).To(Equal("dra.hugepages-1g"))
+
+			// A memory-only claim must not also require an unrelated dra.cpu
+			// device to be allocated, or an otherwise valid memory-only VMI
+			// could fail to schedule on a cluster with no CPU DRA driver.
+			for _, req := range claim.Spec.Devices.Requests {
+				Expect(req.Name).ToNot(Equal(CPURequestName))
+			}
+			Expect(claim.Spec.Devices.Constraints).To(BeEmpty())
+		})
+
 		It("builds a combined CPU+memory claim with a NUMA-alignment constraint when both are requested", func() {
 			vmi := newVMI(true, "1Gi")
 			memSize := resource.MustParse("4Gi")
-			claim := NewResourcesClaim(vmi, 8, &memSize, "dra.hugepages-1g")
+			claim := NewResourcesClaim(vmi, true, 8, &memSize, "dra.hugepages-1g")
 
 			Expect(claim.Spec.Devices.Requests).To(HaveLen(2))
 
@@ -180,7 +199,7 @@ var _ = Describe("Resources DRA", func() {
 
 		It("omits the mem request and constraint when memorySize is nil", func() {
 			vmi := newVMI(true, "")
-			claim := NewResourcesClaim(vmi, 8, nil, "")
+			claim := NewResourcesClaim(vmi, true, 8, nil, "")
 
 			Expect(claim.Spec.Devices.Requests).To(HaveLen(1))
 			Expect(claim.Spec.Devices.Constraints).To(BeEmpty())

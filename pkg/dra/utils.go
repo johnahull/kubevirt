@@ -27,7 +27,6 @@ import (
 	"strconv"
 	"strings"
 
-	resourcev1 "k8s.io/api/resource/v1"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/log"
 
@@ -258,8 +257,7 @@ func GetNUMANodeForClaim(
 		return -1, err
 	}
 
-	numaAttr := resourcev1.QualifiedName("resource.kubernetes.io/numaNode")
-	if attr, ok := device.Attributes[numaAttr]; ok && attr.IntValue != nil {
+	if attr, ok := device.Attributes[metadata.NUMANodeAttribute]; ok && attr.IntValue != nil {
 		return *attr.IntValue, nil
 	}
 
@@ -387,8 +385,7 @@ func DiscoverNUMANodesFromAllMetadata(basePath string) ([]NUMADeviceInfo, error)
 					Driver:      dev.Driver,
 					NUMANode:    -1,
 				}
-				numaAttr := resourcev1.QualifiedName("resource.kubernetes.io/numaNode")
-				if attr, ok := dev.Attributes[numaAttr]; ok && attr.IntValue != nil {
+				if attr, ok := dev.Attributes[metadata.NUMANodeAttribute]; ok && attr.IntValue != nil {
 					info.NUMANode = *attr.IntValue
 				} else if nodes, ok := numaMap[dev.Name]; ok && len(nodes) > 0 {
 					info.NUMANode = nodes[0]
@@ -435,7 +432,7 @@ func extractNUMANodeLists(path string) map[string][]int64 {
 	for _, entry := range raw {
 		for _, req := range entry.Requests {
 			for _, dev := range req.Devices {
-				numaRaw, ok := dev.Attributes["resource.kubernetes.io/numaNode"]
+				numaRaw, ok := dev.Attributes[string(metadata.NUMANodeAttribute)]
 				if !ok {
 					continue
 				}

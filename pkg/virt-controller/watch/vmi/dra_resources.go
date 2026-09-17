@@ -69,13 +69,13 @@ func (c *Controller) handleDRAResourcesClaim(vmi *virtv1.VirtualMachineInstance)
 		if err != nil {
 			return common.NewSyncError(
 				fmt.Errorf("failed to resolve DRA memory DeviceClass for vmi %s/%s: %v", vmi.Namespace, vmi.Name, err),
-				controller.FailedCPUDRAClaimCreateReason,
+				controller.FailedDRAResourcesClaimCreateReason,
 			)
 		}
 		hugepageDeviceClass = class
 	}
 
-	claim := dra.NewResourcesClaim(vmi, hostCPUs, memorySize, hugepageDeviceClass)
+	claim := dra.NewResourcesClaim(vmi, usesCPUDRA, hostCPUs, memorySize, hugepageDeviceClass)
 	if syncErr := c.ensureResourcesClaim(vmi, claim); syncErr != nil {
 		return syncErr
 	}
@@ -88,7 +88,7 @@ func (c *Controller) handleDRAResourcesClaim(vmi *virtv1.VirtualMachineInstance)
 	if err := c.setUsesDRAResourcesAnnotation(vmi); err != nil {
 		return common.NewSyncError(
 			fmt.Errorf("failed to annotate vmi %s/%s as using DRA resources: %v", vmi.Namespace, vmi.Name, err),
-			controller.FailedCPUDRAClaimCreateReason,
+			controller.FailedDRAResourcesClaimCreateReason,
 		)
 	}
 
@@ -107,7 +107,7 @@ func (c *Controller) ensureResourcesClaim(vmi *virtv1.VirtualMachineInstance, cl
 	if !k8serrors.IsAlreadyExists(err) {
 		return common.NewSyncError(
 			fmt.Errorf("failed to create DRA ResourceClaim for vmi %s/%s: %v", vmi.Namespace, vmi.Name, err),
-			controller.FailedCPUDRAClaimCreateReason,
+			controller.FailedDRAResourcesClaimCreateReason,
 		)
 	}
 
@@ -122,14 +122,14 @@ func (c *Controller) ensureResourcesClaim(vmi *virtv1.VirtualMachineInstance, cl
 	if getErr != nil {
 		return common.NewSyncError(
 			fmt.Errorf("failed to get existing DRA ResourceClaim for vmi %s/%s: %v", vmi.Namespace, vmi.Name, getErr),
-			controller.FailedCPUDRAClaimCreateReason,
+			controller.FailedDRAResourcesClaimCreateReason,
 		)
 	}
 	if !isOwnedBy(existing.OwnerReferences, vmi.UID) {
 		return common.NewSyncError(
 			fmt.Errorf("DRA ResourceClaim %s/%s already exists and is not owned by vmi %s (uid %s)",
 				vmi.Namespace, claim.Name, vmi.Name, vmi.UID),
-			controller.FailedCPUDRAClaimCreateReason,
+			controller.FailedDRAResourcesClaimCreateReason,
 		)
 	}
 

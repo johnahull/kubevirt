@@ -116,20 +116,26 @@ func HugepageDeviceClass(pageSize string) (string, error) {
 // NewResourcesClaim builds the KubeVirt-owned ResourceClaim for a VMI's
 // exclusive CPUs and/or DRA-backed hugepages.
 //
-// hostCPUs sizes the cpu request and is always included. memorySize and
-// hugepageDeviceClass are optional (nil / "" to omit the mem request); when
-// both cpu and mem requests are present, a DeviceConstraint ties them to the
-// same host NUMA node via the standard numaNode attribute both dra-driver-cpu
-// and dra-driver-memory publish, so DRA's scheduler guarantees alignment
-// instead of leaving it to chance.
+// usesCPUDRA controls whether the cpu request is included at all; when true,
+// hostCPUs sizes it. memorySize and hugepageDeviceClass are similarly
+// optional (nil / "" to omit the mem request). Both requests must be omittable
+// independently: a memory-only claim must not also require an unrelated
+// dra.cpu device (capacity 0) to be allocated, which would make an otherwise
+// valid memory-only VMI fail to schedule on a cluster with no CPU DRA driver.
+// When both cpu and mem requests are present, a DeviceConstraint ties them to
+// the same host NUMA node via the standard numaNode attribute both
+// dra-driver-cpu and dra-driver-memory publish, so DRA's scheduler guarantees
+// alignment instead of leaving it to chance.
 func NewResourcesClaim(
 	vmi *v1.VirtualMachineInstance,
+	usesCPUDRA bool,
 	hostCPUs int64,
 	memorySize *resource.Quantity,
 	hugepageDeviceClass string,
 ) *resourcev1.ResourceClaim {
-	requests := []resourcev1.DeviceRequest{
-		{
+	var requests []resourcev1.DeviceRequest
+	if usesCPUDRA {
+		requests = append(requests, resourcev1.DeviceRequest{
 			Name: CPURequestName,
 			Exactly: &resourcev1.ExactDeviceRequest{
 				DeviceClassName: CPUDeviceClassName,
@@ -139,11 +145,11 @@ func NewResourcesClaim(
 					},
 				},
 			},
-		},
+		})
 	}
 
-	var constraints []resourcev1.DeviceConstraint
-	if memorySize != nil && hugepageDeviceClass != "" {
+	usesMemoryDRA := memorySize != nil && hugepageDeviceClass != ""
+	if usesMemoryDRA {
 		requests = append(requests, resourcev1.DeviceRequest{
 			Name: MemoryRequestName,
 			Exactly: &resourcev1.ExactDeviceRequest{
@@ -155,6 +161,10 @@ func NewResourcesClaim(
 				},
 			},
 		})
+	}
+
+	var constraints []resourcev1.DeviceConstraint
+	if usesCPUDRA && usesMemoryDRA {
 		constraints = append(constraints, resourcev1.DeviceConstraint{
 			MatchAttribute: ptr.To(resourcev1.FullyQualifiedName(metadata.NUMANodeAttribute)),
 			Requests:       []string{CPURequestName, MemoryRequestName},

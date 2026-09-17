@@ -345,13 +345,13 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 				return configureGraceIOVirtualization(&domain.Spec, c.GraceHostDeviceAliases, c.IOMMUFDEnabled)
 			}
 
-			if err := buildDRANUMACells(domain, vmi, c, nil); err != nil {
+			if hostToGuest, err := buildDRANUMACells(domain, vmi, c); err != nil {
 				log.Log.Reason(err).Warningf("Failed to build DRA NUMA cells, falling back to cpuset-based NUMA")
 				if err := vcpu.AdjustDomainForTopologyAndCPUSet(domain, vmi, c.Topology, c.CPUSet); err != nil {
 					return err
 				}
 			} else {
-				applyDRANUMATopology(domain, vmi)
+				applyDRANUMATopology(domain, vmi, hostToGuest)
 			}
 		} else if vmi.IsCPUDedicated() {
 			if err := vcpu.AdjustDomainForTopologyAndCPUSet(domain, vmi, c.Topology, c.CPUSet); err != nil {
@@ -381,10 +381,10 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 				}
 			}
 		} else if hasDRAGuestMapping {
-			if err := buildDRANUMACells(domain, vmi, c, nil); err != nil {
+			if hostToGuest, err := buildDRANUMACells(domain, vmi, c); err != nil {
 				log.Log.Reason(err).Warningf("Failed to build DRA NUMA cells")
 			} else {
-				applyDRANUMATopology(domain, vmi)
+				applyDRANUMATopology(domain, vmi, hostToGuest)
 			}
 		}
 	}
@@ -470,25 +470,16 @@ func buildDRAPlacementOverrides(
 	return overrides
 }
 
-// numaNodesFromOverrides extracts the unique set of NUMA node IDs from
-// per-device placement overrides.
-func numaNodesFromOverrides(
-	overrides map[string]DevicePlacementOverride,
-) map[uint32]bool {
-	if len(overrides) == 0 {
-		return nil
-	}
-	nodes := make(map[uint32]bool)
-	for _, ovr := range overrides {
-		nodes[ovr.NUMANode] = true
-	}
-	return nodes
-}
-
-func applyDRANUMATopology(domain *api.Domain, vmi *v1.VirtualMachineInstance) {
+// applyDRANUMATopology places DRA-backed GPUs/HostDevices onto the guest NUMA
+// cells buildDRANUMACells already built. hostToGuest must be the mapping
+// buildDRANUMACells returned for this same domain: it is the only accurate
+// record of which guest cell ID was actually assigned to each host NUMA node
+// (guest cell IDs are sequential integers assigned in sorted-host-NUMA order,
+// not the host NUMA ID itself, so this cannot be recomputed later from a
+// different, potentially smaller, subset of NUMA nodes without risking a
+// mismatched host-to-guest correspondence).
+func applyDRANUMATopology(domain *api.Domain, vmi *v1.VirtualMachineInstance, hostToGuest map[uint32]uint32) {
 	ovr := buildDRAPlacementOverrides(vmi)
-	draDeviceNUMANodes := numaNodesFromOverrides(ovr)
-	hostToGuest := buildHostToGuestNUMAMapping(&domain.Spec, draDeviceNUMANodes)
 	injectGuestSLITDistances(&domain.Spec, hostToGuest)
 
 	if len(ovr) > 0 {
@@ -502,15 +493,21 @@ func applyDRANUMATopology(domain *api.Domain, vmi *v1.VirtualMachineInstance) {
 }
 
 // buildDRANUMACells constructs guest NUMA cells from DRA device metadata,
-// distributing vCPUs and memory evenly across the discovered NUMA nodes.
-// It scans all KEP-5304 metadata files mounted into the pod to discover
-// NUMA nodes from every allocated device (CPUs, GPUs, NICs, etc.).
+// distributing vCPUs and memory evenly across the discovered NUMA nodes. It
+// scans all KEP-5304 metadata files mounted into the pod to discover NUMA
+// nodes from every allocated device (CPUs, GPUs, NICs, etc.).
+//
+// It returns the host-NUMA-ID-to-guest-cell-ID mapping it built the cells
+// with. Guest cell IDs are sequential integers assigned in sorted-host-NUMA
+// order, not the host NUMA ID itself, so this mapping must come from here --
+// recomputing it later from a different (e.g. GPU/HostDevice-only) subset of
+// NUMA nodes would sort a different, potentially smaller set and produce a
+// mismatched correspondence.
 func buildDRANUMACells(
 	domain *api.Domain,
 	vmi *v1.VirtualMachineInstance,
 	c *convertertypes.ConverterContext,
-	deviceNUMANodes map[uint32]bool,
-) error {
+) (map[uint32]uint32, error) {
 	allDevices, err := drautil.DiscoverNUMANodesFromAllMetadata(drautil.DefaultMetadataBasePath)
 	if err != nil {
 		log.Log.Reason(err).Warning("Failed to discover NUMA nodes from DRA metadata")
@@ -522,12 +519,9 @@ func buildDRANUMACells(
 			numaNodes[dev.NUMANode] = true
 		}
 	}
-	for n := range deviceNUMANodes {
-		numaNodes[int64(n)] = true
-	}
 
 	if len(numaNodes) == 0 {
-		return fmt.Errorf("no NUMA nodes found in DRA metadata")
+		return nil, fmt.Errorf("no NUMA nodes found in DRA metadata")
 	}
 
 	vcpus := hardware.GetNumberOfVCPUs(vmi.Spec.Domain.CPU)
@@ -552,11 +546,12 @@ func buildDRANUMACells(
 		guestMemory = req.Value() / 1024
 	}
 	if guestMemory <= 0 {
-		return fmt.Errorf("cannot build DRA NUMA cells: no guest memory configured")
+		return nil, fmt.Errorf("cannot build DRA NUMA cells: no guest memory configured")
 	}
 	memPerCell := guestMemory / numCells
 
 	domain.Spec.CPU.NUMA = &api.NUMA{}
+	hostToGuest := make(map[uint32]uint32, len(sortedNUMAs))
 	var cpuID int64
 	for i, numaID := range sortedNUMAs {
 		cpus := cpuPerCell
@@ -584,38 +579,14 @@ func buildDRANUMACells(
 			Unit:   "KiB",
 		}
 		domain.Spec.CPU.NUMA.Cells = append(domain.Spec.CPU.NUMA.Cells, cell)
+		//nolint:gosec // G115: NUMA node/cell IDs are small positive integers
+		hostToGuest[uint32(numaID)] = uint32(i)
 
 		log.Log.Infof("DRA NUMA cell: guest=%d host=%d cpus=%s memory=%d KiB",
 			i, numaID, strings.Join(cpuList, ","), cellMem)
 	}
 
-	return nil
-}
-
-// buildHostToGuestNUMAMapping creates a mapping from host NUMA node IDs to
-// guest NUMA cell IDs based on sorted order correspondence.
-func buildHostToGuestNUMAMapping(spec *api.DomainSpec, deviceNUMANodes map[uint32]bool) map[uint32]uint32 {
-	hostToGuest := make(map[uint32]uint32)
-	if spec.CPU.NUMA == nil {
-		return hostToGuest
-	}
-
-	sortedHostNUMAs := make([]uint32, 0, len(deviceNUMANodes))
-	for n := range deviceNUMANodes {
-		sortedHostNUMAs = append(sortedHostNUMAs, n)
-	}
-	sort.Slice(sortedHostNUMAs, func(i, j int) bool { return sortedHostNUMAs[i] < sortedHostNUMAs[j] })
-
-	for i, hostNUMA := range sortedHostNUMAs {
-		if i < len(spec.CPU.NUMA.Cells) {
-			guestID, err := strconv.ParseUint(spec.CPU.NUMA.Cells[i].ID, 10, 32)
-			if err == nil {
-				hostToGuest[hostNUMA] = uint32(guestID)
-			}
-		}
-	}
-
-	return hostToGuest
+	return hostToGuest, nil
 }
 
 // transformDRAOverridesToGuestCells remaps device NUMA overrides from host

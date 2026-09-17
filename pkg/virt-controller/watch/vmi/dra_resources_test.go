@@ -60,6 +60,16 @@ var _ = Describe("handleDRAResourcesClaim", func() {
 		return vmi
 	}
 
+	// newNonDedicatedCPUVMI builds a VMI without dedicatedCpuPlacement, for
+	// exercising the memory-DRA-only path (usesCPUDRA == false).
+	newNonDedicatedCPUVMI := func(name string, uid types.UID, opts ...libvmi.Option) *virtv1.VirtualMachineInstance {
+		allOpts := append([]libvmi.Option{libvmi.WithNamespace("default")}, opts...)
+		vmi := libvmi.New(allOpts...)
+		vmi.Name = name
+		vmi.UID = uid
+		return vmi
+	}
+
 	// addVMI registers vmi with the fake VirtualMachineInstance clientset so
 	// setUsesDRAResourcesAnnotation's Patch call has an object to patch.
 	addVMI := func(vmi *virtv1.VirtualMachineInstance) {
@@ -129,6 +139,20 @@ var _ = Describe("handleDRAResourcesClaim", func() {
 		Expect(claim.Spec.Devices.Constraints).To(HaveLen(1))
 	})
 
+	It("creates a memory-only claim with no cpu request when only MemoryWithDRA is enabled", func() {
+		setUpController("MemoryWithDRA")
+		vmi := newNonDedicatedCPUVMI("testvmi", "uid-1", libvmi.WithHugepages("1Gi"))
+		addVMI(vmi)
+
+		Expect(ctrl.handleDRAResourcesClaim(vmi)).To(BeNil())
+
+		claim, err := kubeClient.ResourceV1().ResourceClaims(vmi.Namespace).Get(context.Background(), dra.ResourcesClaimName(vmi), metav1.GetOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(claim.Spec.Devices.Requests).To(HaveLen(1))
+		Expect(claim.Spec.Devices.Requests[0].Name).To(Equal(dra.MemoryRequestName))
+		Expect(claim.Spec.Devices.Constraints).To(BeEmpty())
+	})
+
 	It("fails when the hugepage size has no known DRA memory DeviceClass", func() {
 		setUpController("CPUsWithDRA", "MemoryWithDRA")
 		vmi := newVMI("testvmi", "uid-1", libvmi.WithHugepages("4Ki"))
@@ -152,7 +176,7 @@ var _ = Describe("handleDRAResourcesClaim", func() {
 	It("fails when a claim with the same name exists but is owned by a different VMI", func() {
 		setUpController("CPUsWithDRA")
 		staleOwner := newVMI("testvmi", "stale-uid")
-		staleClaim := dra.NewResourcesClaim(staleOwner, 4, nil, "")
+		staleClaim := dra.NewResourcesClaim(staleOwner, true, 4, nil, "")
 		_, err := kubeClient.ResourceV1().ResourceClaims(staleOwner.Namespace).Create(context.Background(), staleClaim, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 

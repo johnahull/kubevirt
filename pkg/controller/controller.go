@@ -73,8 +73,11 @@ const (
 	FailedBackendStorageProbeReason = "FailedBackendStorageProbe"
 	// BackendStorageNotReadyReason is added when the backend storage PVC is pending.
 	BackendStorageNotReadyReason = "BackendStorageNotReady"
-	// FailedCPUDRAClaimCreateReason is added when the creation of the synthesized CPU DRA ResourceClaim fails.
-	FailedCPUDRAClaimCreateReason = "FailedCPUDRAClaimCreate"
+	// FailedDRAResourcesClaimCreateReason is added when the creation of the
+	// synthesized CPU/memory DRA ResourceClaim fails, or when its inputs
+	// (e.g. a hugepage size with no known DRA memory DeviceClass) cannot be
+	// resolved.
+	FailedDRAResourcesClaimCreateReason = "FailedDRAResourcesClaimCreate"
 	// SuccessfulHandOverPodReason is added in an event
 	// when the pod ownership transfer from the controller to virt-hander succeeds.
 	SuccessfulHandOverPodReason = "SuccessfulHandOver"
