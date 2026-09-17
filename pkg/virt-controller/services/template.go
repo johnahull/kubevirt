@@ -1648,15 +1648,13 @@ func (t *TemplateService) VMIResourcePredicates(vmi *v1.VirtualMachineInstance, 
 			NewVMIResourceRule(func(vmi *v1.VirtualMachineInstance) bool {
 				return usesCPUDRA || usesMemoryDRA
 			}, WithDRAResources(usesCPUDRA, usesMemoryDRA)),
-			// When memory DRA is in play, hugepages allocation is owned by the
-			// DRA driver (its NRI plugin sets hugetlb cgroup limits directly),
-			// so mirroring the classic hugepages-* pod resource would
-			// double-book against a driver that already assumes it owns that
-			// accounting. WithMemoryOverhead takes over the QEMU/virtualization
-			// overhead accounting that WithHugePages would otherwise fold into
-			// resources.requests/limits.memory, so that accounting isn't lost.
+			// Kubelet requires the hugepages-* pod resource whenever the
+			// HugePages emptyDir volumes below are present, including when
+			// memory placement/allocation is handled by DRA. The DRA claim and
+			// NRI plugin provide NUMA-aware allocation; this request provides
+			// kubelet's required hugepage volume accounting.
 			NewVMIResourceRule(func(vmi *v1.VirtualMachineInstance) bool {
-				return hasHugePages(vmi) && !usesMemoryDRA
+				return hasHugePages(vmi)
 			}, WithHugePages(vmi.Spec.Domain.Memory, memoryOverhead)),
 			NewVMIResourceRule(func(vmi *v1.VirtualMachineInstance) bool {
 				return !hasHugePages(vmi) || usesMemoryDRA

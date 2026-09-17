@@ -300,9 +300,9 @@ var _ = Describe("Template", func() {
 					ResourceClaimName: ptr.To(vmiName + "-dra"),
 				}))
 
-				// The classic hugepages-* pod resource is skipped for the
-				// memory-DRA path: dra-driver-memory owns that accounting.
-				Expect(containers[0].Resources.Requests).ToNot(HaveKey(k8sv1.ResourceName(k8sv1.ResourceHugePagesPrefix + "1Gi")))
+				// Kubelet requires the hugepages-* pod resource for the
+				// HugePages emptyDir volumes even when DRA owns placement.
+				Expect(containers[0].Resources.Requests).To(HaveKey(k8sv1.ResourceName(k8sv1.ResourceHugePagesPrefix + "1Gi")))
 			})
 		})
 
