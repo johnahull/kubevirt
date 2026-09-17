@@ -674,4 +674,415 @@ var _ = Describe("DownwardAPIAttributes", func() {
 			Expect(err.Error()).To(ContainSubstring(fmt.Sprintf("decode %s", metadata.APIVersionV1Alpha1)))
 		})
 	})
+
+	Context("GetNUMANodeForClaim", func() {
+		It("should return numaNode from standard IntValue attribute", func() {
+			numaNode := int64(2)
+			createMetadataFile("numa-claim", "req1", &metadata.DeviceMetadata{
+				ObjectMeta: metav1.ObjectMeta{Name: "numa-claim"},
+				Requests: []metadata.DeviceMetadataRequest{{
+					Name: "req1",
+					Devices: []metadata.Device{{
+						Name: "gpu-0",
+						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+							"resource.kubernetes.io/numaNode": {IntValue: &numaNode},
+						},
+					}},
+				}},
+			})
+
+			resourceClaims := []v1.VirtualMachineInstanceResourceClaim{{
+				Name:              "my-claim",
+				ResourceClaimName: ptr.To("numa-claim"),
+			}}
+
+			node, err := GetNUMANodeForClaim(tempDir, resourceClaims, "my-claim", "req1")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(node).To(Equal(int64(2)))
+		})
+
+		It("should fall back to raw JSON ints list when IntValue is absent", func() {
+			writeRawNUMAMetadata := func(claimName, numaValue string) {
+				dir := filepath.Join(tempDir, resourceClaimsSubdir, claimName, "req1")
+				Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
+				rawJSON := fmt.Sprintf(
+					`{"apiVersion":%q,"kind":"DeviceMetadata",`+
+						`"metadata":{"name":%q},`+
+						`"requests":[{"name":"req1","devices":[`+
+						`{"name":"dev0","attributes":{`+
+						`"resource.kubernetes.io/numaNode":%s}}]}]}`,
+					metadata.APIVersionV1Alpha1, claimName, numaValue,
+				)
+				Expect(os.WriteFile(
+					filepath.Join(dir, "gpu.example.com"+metadataFileSuffix),
+					[]byte(rawJSON), 0o600,
+				)).To(Succeed())
+			}
+
+			writeRawNUMAMetadata("numa-list-claim", `{"ints":[3,5]}`)
+			resourceClaims := []v1.VirtualMachineInstanceResourceClaim{{
+				Name:              "my-claim",
+				ResourceClaimName: ptr.To("numa-list-claim"),
+			}}
+			node, err := GetNUMANodeForClaim(tempDir, resourceClaims, "my-claim", "req1")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(node).To(Equal(int64(3)))
+		})
+
+		It("should return error when numaNode attribute is missing", func() {
+			createMetadataFile("no-numa-claim", "req1", metadataWithoutAttributes("no-numa-claim", "req1"))
+
+			resourceClaims := []v1.VirtualMachineInstanceResourceClaim{{
+				Name:              "my-claim",
+				ResourceClaimName: ptr.To("no-numa-claim"),
+			}}
+
+			_, err := GetNUMANodeForClaim(tempDir, resourceClaims, "my-claim", "req1")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("numaNode not found"))
+		})
+
+		It("should return error when claim ref not found", func() {
+			_, err := GetNUMANodeForClaim(tempDir, nil, "nonexistent", "req1")
+			Expect(err).To(HaveOccurred())
+		})
+	})
+
+	Context("GetPCIeRootForClaim", func() {
+		It("should return pcieRoot when present", func() {
+			pcieRoot := "pci0000:00"
+			createMetadataFile("pcie-claim", "req1", metadataWithAttributes(
+				"pcie-claim", "req1",
+				map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+					metadata.PCIeRootAttribute: {StringValue: &pcieRoot},
+				},
+			))
+
+			resourceClaims := []v1.VirtualMachineInstanceResourceClaim{{
+				Name:              "my-claim",
+				ResourceClaimName: ptr.To("pcie-claim"),
+			}}
+
+			root, err := GetPCIeRootForClaim(tempDir, resourceClaims, "my-claim", "req1")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(root).To(Equal("pci0000:00"))
+		})
+
+		It("should return error when pcieRoot is empty string", func() {
+			createMetadataFile("pcie-empty", "req1", metadataWithAttributes(
+				"pcie-empty", "req1",
+				map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+					metadata.PCIeRootAttribute: {StringValue: ptr.To("")},
+				},
+			))
+
+			resourceClaims := []v1.VirtualMachineInstanceResourceClaim{{
+				Name:              "my-claim",
+				ResourceClaimName: ptr.To("pcie-empty"),
+			}}
+
+			_, err := GetPCIeRootForClaim(tempDir, resourceClaims, "my-claim", "req1")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("pcieRoot not found"))
+		})
+
+		It("should return error when pcieRoot attribute is missing", func() {
+			createMetadataFile("no-pcie-claim", "req1", metadataWithoutAttributes("no-pcie-claim", "req1"))
+
+			resourceClaims := []v1.VirtualMachineInstanceResourceClaim{{
+				Name:              "my-claim",
+				ResourceClaimName: ptr.To("no-pcie-claim"),
+			}}
+
+			_, err := GetPCIeRootForClaim(tempDir, resourceClaims, "my-claim", "req1")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("pcieRoot not found"))
+		})
+	})
+
+	Context("ResolveDevices", func() {
+		It("should return single device", func() {
+			pciAddr := pciAddr0300
+			createMetadataFile("resolve-claim", "req1", &metadata.DeviceMetadata{
+				ObjectMeta: metav1.ObjectMeta{Name: "resolve-claim"},
+				Requests: []metadata.DeviceMetadataRequest{{
+					Name: "req1",
+					Devices: []metadata.Device{{
+						Name: "gpu-0",
+						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
+						},
+					}},
+				}},
+			})
+
+			resourceClaims := []v1.VirtualMachineInstanceResourceClaim{{
+				Name:              "my-claim",
+				ResourceClaimName: ptr.To("resolve-claim"),
+			}}
+
+			devices, err := ResolveDevices(tempDir, resourceClaims, "my-claim", "req1")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(devices).To(HaveLen(1))
+			Expect(*devices[0].Attributes[metadata.PCIBusIDAttribute].StringValue).To(Equal(pciAddr))
+		})
+
+		It("should return multiple devices", func() {
+			pci1 := pciAddr0300
+			pci2 := pciAddr0400
+			createMetadataFile("multi-claim", "req1", &metadata.DeviceMetadata{
+				ObjectMeta: metav1.ObjectMeta{Name: "multi-claim"},
+				Requests: []metadata.DeviceMetadataRequest{{
+					Name: "req1",
+					Devices: []metadata.Device{
+						{Name: "gpu-0", Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+							metadata.PCIBusIDAttribute: {StringValue: &pci1},
+						}},
+						{Name: "gpu-1", Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+							metadata.PCIBusIDAttribute: {StringValue: &pci2},
+						}},
+					},
+				}},
+			})
+
+			resourceClaims := []v1.VirtualMachineInstanceResourceClaim{{
+				Name:              "my-claim",
+				ResourceClaimName: ptr.To("multi-claim"),
+			}}
+
+			devices, err := ResolveDevices(tempDir, resourceClaims, "my-claim", "req1")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(devices).To(HaveLen(2))
+			Expect(devices[0].Name).To(Equal("gpu-0"))
+			Expect(devices[1].Name).To(Equal("gpu-1"))
+		})
+
+		It("should return error when request has no devices", func() {
+			createMetadataFile("empty-claim", "req1", &metadata.DeviceMetadata{
+				ObjectMeta: metav1.ObjectMeta{Name: "empty-claim"},
+				Requests: []metadata.DeviceMetadataRequest{{
+					Name:    "req1",
+					Devices: []metadata.Device{},
+				}},
+			})
+
+			resourceClaims := []v1.VirtualMachineInstanceResourceClaim{{
+				Name:              "my-claim",
+				ResourceClaimName: ptr.To("empty-claim"),
+			}}
+
+			_, err := ResolveDevices(tempDir, resourceClaims, "my-claim", "req1")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("no devices"))
+		})
+
+		It("should return error when request not found", func() {
+			createMetadataFile("req-miss-claim", "other-req", metadataWithoutAttributes("req-miss-claim", "other-req"))
+
+			resourceClaims := []v1.VirtualMachineInstanceResourceClaim{{
+				Name:              "my-claim",
+				ResourceClaimName: ptr.To("req-miss-claim"),
+			}}
+
+			_, err := ResolveDevices(tempDir, resourceClaims, "my-claim", "missing-req")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("failed to read metadata"))
+		})
+	})
+
+	Context("DiscoverNUMANodesFromAllMetadata", func() {
+		It("should discover devices with NUMA, PCIBusID, and PCIeRoot", func() {
+			numaNode := int64(0)
+			pciAddr := pciAddr0300
+			pcieRoot := "pci0000:00"
+			dir := filepath.Join(tempDir, resourceClaimsSubdir, "gpu-claim", "gpu-req")
+			Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
+			md := &metadata.DeviceMetadata{
+				TypeMeta:   metav1.TypeMeta{APIVersion: metadata.APIVersionV1Alpha1, Kind: "DeviceMetadata"},
+				ObjectMeta: metav1.ObjectMeta{Name: "gpu-claim"},
+				Requests: []metadata.DeviceMetadataRequest{{
+					Name: "gpu-req",
+					Devices: []metadata.Device{{
+						Name:   "gpu-0",
+						Driver: "nvidia.com",
+						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+							"resource.kubernetes.io/numaNode": {IntValue: &numaNode},
+							metadata.PCIBusIDAttribute:        {StringValue: &pciAddr},
+							metadata.PCIeRootAttribute:        {StringValue: &pcieRoot},
+						},
+					}},
+				}},
+			}
+			data, err := json.Marshal(md)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(os.WriteFile(filepath.Join(dir, "nvidia.com"+metadataFileSuffix), data, 0o600)).To(Succeed())
+
+			devices, err := DiscoverNUMANodesFromAllMetadata(tempDir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(devices).To(HaveLen(1))
+			Expect(devices[0].NUMANode).To(Equal(int64(0)))
+			Expect(devices[0].PCIBusID).To(Equal(pciAddr0300))
+			Expect(devices[0].PCIeRoot).To(Equal("pci0000:00"))
+			Expect(devices[0].Driver).To(Equal("nvidia.com"))
+		})
+
+		It("should return -1 for devices without NUMA info", func() {
+			pciAddr := pciAddr0300
+			dir := filepath.Join(tempDir, resourceClaimsSubdir, "no-numa-claim", "req1")
+			Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
+			md := &metadata.DeviceMetadata{
+				TypeMeta:   metav1.TypeMeta{APIVersion: metadata.APIVersionV1Alpha1, Kind: "DeviceMetadata"},
+				ObjectMeta: metav1.ObjectMeta{Name: "no-numa-claim"},
+				Requests: []metadata.DeviceMetadataRequest{{
+					Name: "req1",
+					Devices: []metadata.Device{{
+						Name:   "nic-0",
+						Driver: "sriov.example.com",
+						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
+						},
+					}},
+				}},
+			}
+			data, err := json.Marshal(md)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(os.WriteFile(filepath.Join(dir, "sriov.example.com"+metadataFileSuffix), data, 0o600)).To(Succeed())
+
+			devices, err := DiscoverNUMANodesFromAllMetadata(tempDir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(devices).To(HaveLen(1))
+			Expect(devices[0].NUMANode).To(Equal(int64(-1)))
+			Expect(devices[0].PCIBusID).To(Equal(pciAddr0300))
+		})
+
+		It("should return empty slice when no metadata files exist", func() {
+			devices, err := DiscoverNUMANodesFromAllMetadata(tempDir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(devices).To(BeEmpty())
+		})
+
+		It("should aggregate devices across multiple claims", func() {
+			writeMd := func(claimName, reqName, driver string, md *metadata.DeviceMetadata) {
+				dir := filepath.Join(tempDir, resourceClaimsSubdir, claimName, reqName)
+				Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
+				md.TypeMeta = metav1.TypeMeta{
+					APIVersion: metadata.APIVersionV1Alpha1,
+					Kind:       "DeviceMetadata",
+				}
+				data, err := json.Marshal(md)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(os.WriteFile(
+					filepath.Join(dir, driver+metadataFileSuffix),
+					data, 0o600,
+				)).To(Succeed())
+			}
+
+			gpuNUMA := int64(0)
+			gpuPCI := pciAddr0300
+			writeMd("gpu-claim", "gpu-req", "nvidia.com", &metadata.DeviceMetadata{
+				ObjectMeta: metav1.ObjectMeta{Name: "gpu-claim"},
+				Requests: []metadata.DeviceMetadataRequest{{
+					Name: "gpu-req",
+					Devices: []metadata.Device{{
+						Name:   "gpu-0",
+						Driver: "nvidia.com",
+						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+							"resource.kubernetes.io/numaNode": {IntValue: &gpuNUMA},
+							metadata.PCIBusIDAttribute:        {StringValue: &gpuPCI},
+						},
+					}},
+				}},
+			})
+
+			nicNUMA := int64(1)
+			nicPCI := pciAddr0400
+			writeMd("nic-claim", "nic-req", "sriov.example.com", &metadata.DeviceMetadata{
+				ObjectMeta: metav1.ObjectMeta{Name: "nic-claim"},
+				Requests: []metadata.DeviceMetadataRequest{{
+					Name: "nic-req",
+					Devices: []metadata.Device{{
+						Name:   "nic-0",
+						Driver: "sriov.example.com",
+						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+							"resource.kubernetes.io/numaNode": {IntValue: &nicNUMA},
+							metadata.PCIBusIDAttribute:        {StringValue: &nicPCI},
+						},
+					}},
+				}},
+			})
+
+			devices, err := DiscoverNUMANodesFromAllMetadata(tempDir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(devices).To(HaveLen(2))
+
+			numaNodes := map[int64]bool{}
+			for _, d := range devices {
+				numaNodes[d.NUMANode] = true
+			}
+			Expect(numaNodes).To(HaveKey(int64(0)))
+			Expect(numaNodes).To(HaveKey(int64(1)))
+		})
+	})
+
+	Context("ReadHostSLITDistances", func() {
+		var sysfsDir string
+
+		BeforeEach(func() {
+			var err error
+			sysfsDir, err = os.MkdirTemp("", "numa-sysfs-test")
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		AfterEach(func() {
+			os.RemoveAll(sysfsDir)
+		})
+
+		writeNodeDistance := func(nodeDir, content string) {
+			Expect(os.MkdirAll(filepath.Join(sysfsDir, nodeDir), 0o755)).To(Succeed())
+			Expect(os.WriteFile(
+				filepath.Join(sysfsDir, nodeDir, "distance"),
+				[]byte(content), 0o600,
+			)).To(Succeed())
+		}
+
+		It("should read distances from valid node directories", func() {
+			writeNodeDistance("node0", "10 20\n")
+			writeNodeDistance("node1", "20 10\n")
+
+			distances, err := ReadHostSLITDistances(sysfsDir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(distances).To(HaveLen(2))
+			Expect(distances[0]).To(Equal([]int{10, 20}))
+			Expect(distances[1]).To(Equal([]int{20, 10}))
+		})
+
+		It("should skip non-numeric dirs and nodes without distance files", func() {
+			writeNodeDistance("node0", "10 20\n")
+			Expect(os.MkdirAll(filepath.Join(sysfsDir, "node_dma_heap"), 0o755)).To(Succeed())
+			Expect(os.MkdirAll(filepath.Join(sysfsDir, "node1"), 0o755)).To(Succeed())
+
+			distances, err := ReadHostSLITDistances(sysfsDir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(distances).To(HaveLen(1))
+			Expect(distances[0]).To(Equal([]int{10, 20}))
+		})
+
+		It("should skip nodes with malformed distance values", func() {
+			writeNodeDistance("node0", "10 abc\n")
+
+			distances, err := ReadHostSLITDistances(sysfsDir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(distances).To(BeEmpty())
+		})
+
+		It("should return empty map when no nodes exist", func() {
+			emptyDir, err := os.MkdirTemp("", "empty-sysfs")
+			Expect(err).ToNot(HaveOccurred())
+			defer os.RemoveAll(emptyDir)
+
+			distances, err := ReadHostSLITDistances(emptyDir)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(distances).To(BeEmpty())
+		})
+	})
 })

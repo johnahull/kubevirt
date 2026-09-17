@@ -394,7 +394,7 @@ var _ = Describe("PCIe Expander Bus Assigner", func() {
 				createPCIDevice("normal", "0x03"),
 			}
 			assigner = newExpanderBusAssignerWithOptions(domainSpec, map[string]*api.IOMMUDevice{
-				"0000:01:00.0": &api.IOMMUDevice{Model: "smmuv3", Driver: &api.IOMMUDriver{}},
+				"0000:01:00.0": {Model: "smmuv3", Driver: &api.IOMMUDriver{}},
 			}, nil)
 
 			err := assigner.PlaceNumaAlignedDevices()
@@ -410,7 +410,7 @@ var _ = Describe("PCIe Expander Bus Assigner", func() {
 		It("uses NUMA overrides when placing isolated devices", func() {
 			domainSpec.Devices.HostDevices = []api.HostDevice{createPCIDevice("isolated", "0x01")}
 			assigner = newExpanderBusAssignerWithOptions(domainSpec,
-				map[string]*api.IOMMUDevice{"0000:01:00.0": &api.IOMMUDevice{Model: "smmuv3", Driver: &api.IOMMUDriver{}}},
+				map[string]*api.IOMMUDevice{"0000:01:00.0": {Model: "smmuv3", Driver: &api.IOMMUDriver{}}},
 				map[string]uint32{"0000:01:00.0": 1},
 			)
 
@@ -718,6 +718,129 @@ var _ = Describe("PCIe Expander Bus Assigner", func() {
 			Expect(domainSpec.Devices.Controllers[3].Model).To(Equal(api.ControllerModelPCIeRootPort))
 			Expect(domainSpec.Devices.Controllers[3].Index).To(Equal("9"))
 			Expect(domainSpec.Devices.HostDevices[0].Address.Bus).To(Equal("9"))
+		})
+	})
+
+	Describe("PCIe root complex grouping", func() {
+		var domainSpec *api.DomainSpec
+
+		BeforeEach(func() {
+			domainSpec = createDomainSpecWithNUMA(
+				[]api.NUMACell{{ID: "0", CPUs: "0-1"}, {ID: "1", CPUs: "2-3"}},
+				[]api.CPUTuneVCPUPin{{VCPU: 0, CPUSet: "0"}, {VCPU: 2, CPUSet: "4"}},
+			)
+		})
+
+		countExpanderBuses := func(spec *api.DomainSpec) int {
+			count := 0
+			for _, c := range spec.Devices.Controllers {
+				if c.Model == api.ControllerModelPCIeExpanderBus {
+					count++
+				}
+			}
+			return count
+		}
+
+		It("should place devices with same pcieRoot on one expander bus", func() {
+			domainSpec.Devices.HostDevices = []api.HostDevice{
+				createPCIDevice("device1", "0x01"),
+				createPCIDevice("device2", "0x03"),
+			}
+
+			err := PlacePCIDevicesWithNUMAAlignment(domainSpec,
+				WithDevicePlacementOverrides(map[string]DevicePlacementOverride{
+					"0000:01:00.0": {NUMANode: 0, PCIeRoot: "pci0000:00"},
+					"0000:03:00.0": {NUMANode: 0, PCIeRoot: "pci0000:00"},
+				}))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(countExpanderBuses(domainSpec)).To(Equal(1))
+		})
+
+		It("should place devices with different pcieRoots on separate buses", func() {
+			domainSpec.Devices.HostDevices = []api.HostDevice{
+				createPCIDevice("device1", "0x01"),
+				createPCIDevice("device2", "0x03"),
+			}
+
+			err := PlacePCIDevicesWithNUMAAlignment(domainSpec,
+				WithDevicePlacementOverrides(map[string]DevicePlacementOverride{
+					"0000:01:00.0": {NUMANode: 0, PCIeRoot: "pci0000:00"},
+					"0000:03:00.0": {NUMANode: 0, PCIeRoot: "pci0000:40"},
+				}))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(countExpanderBuses(domainSpec)).To(Equal(2))
+		})
+
+		It("should fall back to NUMA grouping when pcieRoot is absent", func() {
+			domainSpec.Devices.HostDevices = []api.HostDevice{
+				createPCIDevice("device1", "0x01"),
+				createPCIDevice("device2", "0x03"),
+			}
+
+			err := PlacePCIDevicesWithNUMAAlignment(domainSpec,
+				WithDevicePlacementOverrides(map[string]DevicePlacementOverride{
+					"0000:01:00.0": {NUMANode: 0},
+					"0000:03:00.0": {NUMANode: 0},
+				}))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(countExpanderBuses(domainSpec)).To(Equal(1))
+
+			for _, c := range domainSpec.Devices.Controllers {
+				if c.Model == api.ControllerModelPCIeExpanderBus {
+					Expect(c.Target.NUMANode).ToNot(BeNil())
+					Expect(*c.Target.NUMANode).To(Equal(uint32(0)))
+				}
+			}
+		})
+
+		It("should set correct NUMA target for pcieRoot expander buses", func() {
+			domainSpec.Devices.HostDevices = []api.HostDevice{
+				createPCIDevice("device1", "0x01"),
+				createPCIDevice("device2", "0x03"),
+			}
+
+			err := PlacePCIDevicesWithNUMAAlignment(domainSpec,
+				WithDevicePlacementOverrides(map[string]DevicePlacementOverride{
+					"0000:01:00.0": {NUMANode: 0, PCIeRoot: "pci0000:00"},
+					"0000:03:00.0": {NUMANode: 1, PCIeRoot: "pci0000:40"},
+				}))
+			Expect(err).ToNot(HaveOccurred())
+
+			numaTargets := make(map[uint32]bool)
+			for _, c := range domainSpec.Devices.Controllers {
+				if c.Model == api.ControllerModelPCIeExpanderBus {
+					Expect(c.Target.NUMANode).ToNot(BeNil())
+					numaTargets[*c.Target.NUMANode] = true
+				}
+			}
+			Expect(numaTargets).To(HaveKey(uint32(0)))
+			Expect(numaTargets).To(HaveKey(uint32(1)))
+		})
+
+		It("should handle mixed devices with and without pcieRoot", func() {
+			domainSpec.Devices.HostDevices = []api.HostDevice{
+				createPCIDevice("device1", "0x01"),
+				createPCIDevice("device2", "0x03"),
+				createPCIDevice("device3", "0x05"),
+			}
+
+			err := PlacePCIDevicesWithNUMAAlignment(domainSpec,
+				WithDevicePlacementOverrides(map[string]DevicePlacementOverride{
+					"0000:01:00.0": {NUMANode: 0, PCIeRoot: "pci0000:00"},
+					"0000:03:00.0": {NUMANode: 0, PCIeRoot: "pci0000:00"},
+					"0000:05:00.0": {NUMANode: 1},
+				}))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(countExpanderBuses(domainSpec)).To(Equal(2))
+		})
+
+		It("should preserve existing behavior with nil overrides", func() {
+			domainSpec.Devices.HostDevices = []api.HostDevice{
+				createPCIDevice("device1", "0x01"),
+			}
+
+			err := PlacePCIDevicesWithNUMAAlignment(domainSpec)
+			Expect(err).ToNot(HaveOccurred())
 		})
 	})
 })
